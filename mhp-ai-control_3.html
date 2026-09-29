@@ -1611,7 +1611,16 @@ const importStore = (file, onError) => {
  * -------------------------------------------------------------------------- */
 const SP_LIST_NAME = "MHP AI Control State";  // Name der SharePoint-Liste
 const SP_ITEM_ID   = 1;                        // ID des einzigen Listeneintrags
-const SP_BASE      = "";                       // leer = gleiche Domain wie die Seite
+// Site-Basis automatisch aus der aktuellen URL ermitteln
+// z. B. https://mhp.sharepoint.com/sites/MHPGermany
+const SP_BASE = (() => {
+  const parts = window.location.pathname.split("/");
+  const idx = parts.findIndex(p => p === "sites" || p === "teams");
+  if (idx >= 0 && parts[idx + 1]) {
+    return window.location.origin + "/" + parts[idx] + "/" + parts[idx + 1];
+  }
+  return window.location.origin;
+})();
 const remote = {
   enabled: false,
   updatedAt: null,
