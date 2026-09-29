@@ -1604,15 +1604,28 @@ const importStore = (file, onError) => {
 };
 
 /* -----------------------------------------------------------------------------
- * GETEILTER STAND ÜBER SHAREPOINT REST API
- * Liegt das Dashboard in einer SharePoint-Dokumentenbibliothek, werden alle
- * Änderungen direkt in einer SharePoint-Liste gespeichert. Kein separater
- * Server und kein Power Automate notwendig.
+ * GETEILTER STAND ÜBER GITHUB API
+ * data/state.json im privaten GitHub-Repo dient als gemeinsame Datenbank.
+ * GitHub-API unterstützt CORS und funktioniert aus jedem Browser – auch aus
+ * SharePoints iframe.
+ *
+ * ⚠️  GH_TOKEN vor dem Upload zu SharePoint einsetzen.
+ *     Token erstellen: github.com/settings/tokens → repo-Scope
  * -------------------------------------------------------------------------- */
-const SP_LIST_NAME = "MHP AI Control State";  // Name der SharePoint-Liste
-const SP_ITEM_ID   = 1;                        // ID des einzigen Listeneintrags
-// SharePoint-Site-URL (anpassen falls die Datei auf eine andere Site verschoben wird)
-const SP_BASE = "https://mhpcloud.sharepoint.com/sites/mhpgermany";
+const GH_OWNER  = "bengelhardt2";
+const GH_REPO   = "MHP-AI-Use-Case-Control";
+const GH_FILE   = "data/state.json";
+const GH_BRANCH = "main";
+const GH_TOKEN  = "GITHUB_TOKEN_HIER_EINSETZEN";   // ← eigenen Token eintragen
+
+let _ghSha = null;  // SHA der zuletzt gelesenen Datei (für konfliktfreies Schreiben)
+
+const _ghHeaders = () => ({
+  Authorization: `token ${GH_TOKEN}`,
+  Accept: "application/vnd.github.v3+json",
+  "Content-Type": "application/json",
+});
+
 const remote = {
   enabled: false,
   updatedAt: null,
@@ -1622,51 +1635,34 @@ const remote = {
 const remoteListeners = [];
 const notifyRemote = () => remoteListeners.forEach((fn) => fn({ ...remote }));
 
-/* SharePoint-Formulartoken für Schreiboperationen holen (CSRF-Schutz) */
-async function getFormDigest() {
-  const res = await fetch(`${SP_BASE}/_api/contextinfo`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Accept": "application/json;odata=verbose" },
-  });
-  const data = await res.json();
-  return data.d.GetContextWebInformation.FormDigestValue;
-}
-
-/* Angemeldete Person aus SharePoint auslesen */
+/* GitHub-Benutzername als Identität */
 async function loadIdentity() {
   try {
-    const res = await fetch(`${SP_BASE}/_api/web/currentuser?$select=Title,Email`, {
-      credentials: "include",
-      headers: { "Accept": "application/json;odata=verbose" },
-    });
+    if (GH_TOKEN.startsWith("GITHUB_TOKEN")) return null;
+    const res = await fetch("https://api.github.com/user", { headers: _ghHeaders() });
     if (!res.ok) return null;
-    const data = await res.json();
-    const u = data && data.d;
-    if (!u) return null;
-    return { name: u.Title || u.Email || "angemeldet", roles: ["authenticated"] };
-  } catch (e) {
-    return null;
-  }
+    const d = await res.json();
+    return { name: d.name || d.login || "angemeldet", roles: ["authenticated"] };
+  } catch (e) { return null; }
 }
 
-/* Gemeinsamen Stand aus der SharePoint-Liste laden */
+/* Gemeinsamen Stand aus state.json laden */
 async function loadRemoteState() {
   try {
-    const url = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})?$select=StateJson,UpdatedAt`;
-    const res = await fetch(url, {
-      credentials: "include",
-      headers: { "Accept": "application/json;odata=nometadata" },
-    });
+    if (GH_TOKEN.startsWith("GITHUB_TOKEN")) return null;
+    const res = await fetch(
+      `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}?ref=${GH_BRANCH}`,
+      { headers: _ghHeaders() }
+    );
     if (!res.ok) return null;
-    const body = await res.json();
+    const data = await res.json();
+    _ghSha = data.sha;
+    const content = JSON.parse(decodeURIComponent(escape(atob(data.content.replace(/\n/g, "")))));
     remote.enabled = true;
     remote.status = "connected";
-    remote.updatedAt = body.UpdatedAt || null;
-    return body.StateJson ? JSON.parse(body.StateJson) : {};
-  } catch (e) {
-    return null;
-  }
+    remote.updatedAt = content.updatedAt || null;
+    return content.state || {};
+  } catch (e) { return null; }
 }
 
 /* Schreiben wird gebündelt: viele kleine Änderungen ergeben eine Anfrage. */
@@ -1676,64 +1672,52 @@ const pushRemoteState = () => {
   clearTimeout(pushTimer);
   pushTimer = setTimeout(async () => {
     try {
-      // Konflikt-Check: hat jemand anderes seit unserem letzten Lesen geschrieben?
-      const checkUrl = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})?$select=UpdatedAt`;
-      const checkRes = await fetch(checkUrl, {
-        credentials: "include",
-        headers: { "Accept": "application/json;odata=nometadata" },
-      });
-      if (checkRes.ok) {
-        const current = await checkRes.json();
-        if (remote.updatedAt && current.UpdatedAt && current.UpdatedAt !== remote.updatedAt) {
-          remote.status = "conflict";
-          notifyRemote();
-          return;
+      const now  = new Date().toISOString();
+      const body = JSON.stringify({ state: storeCache, updatedAt: now }, null, 2);
+      const encoded = btoa(unescape(encodeURIComponent(body)));
+      const res = await fetch(
+        `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`,
+        {
+          method: "PUT",
+          headers: _ghHeaders(),
+          body: JSON.stringify({
+            message: `Dashboard-Update ${now}`,
+            content: encoded,
+            sha: _ghSha,
+            branch: GH_BRANCH,
+          }),
         }
-      }
-      const digest = await getFormDigest();
-      const now = new Date().toISOString();
-      const writeUrl = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})`;
-      const res = await fetch(writeUrl, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Accept": "application/json;odata=nometadata",
-          "Content-Type": "application/json;odata=nometadata",
-          "X-HTTP-Method": "MERGE",
-          "IF-MATCH": "*",
-          "X-RequestDigest": digest,
-        },
-        body: JSON.stringify({ StateJson: JSON.stringify(storeCache), UpdatedAt: now }),
-      });
-      if (res.ok || res.status === 204) {
+      );
+      if (res.status === 409) {
+        remote.status = "conflict";   // jemand anderes war schneller
+      } else if (res.ok) {
+        const d = await res.json();
+        _ghSha = d.content.sha;
         remote.updatedAt = now;
         remote.status = "connected";
       } else {
         remote.status = "offline";
       }
-    } catch (e) {
-      remote.status = "offline";
-    }
+    } catch (e) { remote.status = "offline"; }
     notifyRemote();
   }, 1200);
 };
 
-/* Prüfen, ob jemand anderes den Stand verändert hat */
+/* Prüfen ob jemand anderes den Stand verändert hat */
 async function checkRemoteFreshness() {
   if (!remote.enabled) return;
   try {
-    const url = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})?$select=UpdatedAt`;
-    const res = await fetch(url, {
-      credentials: "include",
-      headers: { "Accept": "application/json;odata=nometadata" },
-    });
+    const res = await fetch(
+      `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}?ref=${GH_BRANCH}`,
+      { headers: _ghHeaders() }
+    );
     if (!res.ok) return;
-    const body = await res.json();
-    if (body.UpdatedAt && remote.updatedAt && body.UpdatedAt !== remote.updatedAt) {
+    const d = await res.json();
+    if (d.sha && _ghSha && d.sha !== _ghSha) {
       remote.status = "conflict";
       notifyRemote();
     }
-  } catch (e) { /* offline, nicht weiter schlimm */ }
+  } catch (e) { /* offline */ }
 }
 
 /* Auf den Auslieferungsstand zurücksetzen */
