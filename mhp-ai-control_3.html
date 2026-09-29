@@ -1611,7 +1611,9 @@ const importStore = (file, onError) => {
  * Änderungen gebündelt geschrieben, und alle 30 Sekunden wird geprüft, ob
  * jemand anderes etwas geändert hat.
  * -------------------------------------------------------------------------- */
-const REMOTE_ENDPOINT = "/api/state";
+// ↓ Hier die URLs deiner beiden Power-Automate-Flows eintragen (siehe README)
+const REMOTE_GET_ENDPOINT  = "HIER_GET_FLOW_URL_EINSETZEN";
+const REMOTE_PUT_ENDPOINT  = "HIER_SAVE_FLOW_URL_EINSETZEN";
 const remote = {
   enabled: false,      // wird beim Start ermittelt
   updatedAt: null,     // Stand, den dieser Browser zuletzt gesehen hat
@@ -1621,17 +1623,20 @@ const remote = {
 const remoteListeners = [];
 const notifyRemote = () => remoteListeners.forEach((fn) => fn({ ...remote }));
 
-/* Angemeldete Person aus dem vorgeschalteten SSO auslesen */
+/* Angemeldete Person aus SharePoint auslesen */
 async function loadIdentity() {
   try {
-    const res = await fetch("/.auth/me", { credentials: "include" });
+    const res = await fetch("/_api/web/currentuser?$select=Title,Email", {
+      headers: { "Accept": "application/json;odata=verbose" },
+      credentials: "include",
+    });
     if (!res.ok) return null;
     const data = await res.json();
-    const p = (data.clientPrincipal) || (Array.isArray(data) && data[0]);
-    if (!p) return null;
+    const u = data && data.d;
+    if (!u) return null;
     return {
-      name: p.userDetails || p.user_id || "angemeldet",
-      roles: p.userRoles || [],
+      name: u.Title || u.Email || "angemeldet",
+      roles: ["authenticated"],
     };
   } catch (e) {
     return null;
@@ -1641,7 +1646,8 @@ async function loadIdentity() {
 /* Gemeinsamen Stand laden. Gibt null zurück, wenn keine API erreichbar ist. */
 async function loadRemoteState() {
   try {
-    const res = await fetch(REMOTE_ENDPOINT, { credentials: "include" });
+    if (!REMOTE_GET_ENDPOINT || REMOTE_GET_ENDPOINT.startsWith("HIER")) return null;
+    const res = await fetch(REMOTE_GET_ENDPOINT);
     if (!res.ok) return null;
     const body = await res.json();
     remote.enabled = true;
@@ -1660,9 +1666,8 @@ const pushRemoteState = () => {
   clearTimeout(pushTimer);
   pushTimer = setTimeout(async () => {
     try {
-      const res = await fetch(REMOTE_ENDPOINT, {
-        method: "PUT",
-        credentials: "include",
+      const res = await fetch(REMOTE_PUT_ENDPOINT, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state: storeCache, baseUpdatedAt: remote.updatedAt }),
       });
@@ -1686,7 +1691,7 @@ const pushRemoteState = () => {
 async function checkRemoteFreshness() {
   if (!remote.enabled) return;
   try {
-    const res = await fetch(REMOTE_ENDPOINT, { credentials: "include" });
+    const res = await fetch(REMOTE_GET_ENDPOINT);
     if (!res.ok) return;
     const body = await res.json();
     if (body.updatedAt && remote.updatedAt && body.updatedAt !== remote.updatedAt) {
