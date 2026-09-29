@@ -1604,56 +1604,65 @@ const importStore = (file, onError) => {
 };
 
 /* -----------------------------------------------------------------------------
- * GETEILTER STAND ÜBER EINE API
- * Läuft das Dashboard als Datei (file://), gibt es nur den Browserspeicher.
- * Wird es über eine Adresse ausgeliefert, die /api/state anbietet, arbeiten
- * alle Teilnehmenden auf demselben Stand: Beim Start wird gelesen, bei
- * Änderungen gebündelt geschrieben, und alle 30 Sekunden wird geprüft, ob
- * jemand anderes etwas geändert hat.
+ * GETEILTER STAND ÜBER SHAREPOINT REST API
+ * Liegt das Dashboard in einer SharePoint-Dokumentenbibliothek, werden alle
+ * Änderungen direkt in einer SharePoint-Liste gespeichert. Kein separater
+ * Server und kein Power Automate notwendig.
  * -------------------------------------------------------------------------- */
-// ↓ Hier die URLs deiner beiden Power-Automate-Flows eintragen (siehe README)
-const REMOTE_GET_ENDPOINT  = "HIER_GET_FLOW_URL_EINSETZEN";
-const REMOTE_PUT_ENDPOINT  = "HIER_SAVE_FLOW_URL_EINSETZEN";
+const SP_LIST_NAME = "MHP AI Control State";  // Name der SharePoint-Liste
+const SP_ITEM_ID   = 1;                        // ID des einzigen Listeneintrags
+const SP_BASE      = "";                       // leer = gleiche Domain wie die Seite
 const remote = {
-  enabled: false,      // wird beim Start ermittelt
-  updatedAt: null,     // Stand, den dieser Browser zuletzt gesehen hat
-  user: null,          // angemeldete Person aus dem SSO
-  status: "local",     // local | connected | offline | conflict
+  enabled: false,
+  updatedAt: null,
+  user: null,
+  status: "local",
 };
 const remoteListeners = [];
 const notifyRemote = () => remoteListeners.forEach((fn) => fn({ ...remote }));
 
+/* SharePoint-Formulartoken für Schreiboperationen holen (CSRF-Schutz) */
+async function getFormDigest() {
+  const res = await fetch(`${SP_BASE}/_api/contextinfo`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Accept": "application/json;odata=verbose" },
+  });
+  const data = await res.json();
+  return data.d.GetContextWebInformation.FormDigestValue;
+}
+
 /* Angemeldete Person aus SharePoint auslesen */
 async function loadIdentity() {
   try {
-    const res = await fetch("/_api/web/currentuser?$select=Title,Email", {
-      headers: { "Accept": "application/json;odata=verbose" },
+    const res = await fetch(`${SP_BASE}/_api/web/currentuser?$select=Title,Email`, {
       credentials: "include",
+      headers: { "Accept": "application/json;odata=verbose" },
     });
     if (!res.ok) return null;
     const data = await res.json();
     const u = data && data.d;
     if (!u) return null;
-    return {
-      name: u.Title || u.Email || "angemeldet",
-      roles: ["authenticated"],
-    };
+    return { name: u.Title || u.Email || "angemeldet", roles: ["authenticated"] };
   } catch (e) {
     return null;
   }
 }
 
-/* Gemeinsamen Stand laden. Gibt null zurück, wenn keine API erreichbar ist. */
+/* Gemeinsamen Stand aus der SharePoint-Liste laden */
 async function loadRemoteState() {
   try {
-    if (!REMOTE_GET_ENDPOINT || REMOTE_GET_ENDPOINT.startsWith("HIER")) return null;
-    const res = await fetch(REMOTE_GET_ENDPOINT);
+    const url = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})?$select=StateJson,UpdatedAt`;
+    const res = await fetch(url, {
+      credentials: "include",
+      headers: { "Accept": "application/json;odata=nometadata" },
+    });
     if (!res.ok) return null;
     const body = await res.json();
     remote.enabled = true;
     remote.status = "connected";
-    remote.updatedAt = body.updatedAt || null;
-    return body.state || {};
+    remote.updatedAt = body.UpdatedAt || null;
+    return body.StateJson ? JSON.parse(body.StateJson) : {};
   } catch (e) {
     return null;
   }
@@ -1666,16 +1675,37 @@ const pushRemoteState = () => {
   clearTimeout(pushTimer);
   pushTimer = setTimeout(async () => {
     try {
-      const res = await fetch(REMOTE_PUT_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ state: storeCache, baseUpdatedAt: remote.updatedAt }),
+      // Konflikt-Check: hat jemand anderes seit unserem letzten Lesen geschrieben?
+      const checkUrl = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})?$select=UpdatedAt`;
+      const checkRes = await fetch(checkUrl, {
+        credentials: "include",
+        headers: { "Accept": "application/json;odata=nometadata" },
       });
-      if (res.status === 409) {
-        remote.status = "conflict";   // jemand anderes war schneller
-      } else if (res.ok) {
-        const body = await res.json();
-        remote.updatedAt = body.updatedAt || remote.updatedAt;
+      if (checkRes.ok) {
+        const current = await checkRes.json();
+        if (remote.updatedAt && current.UpdatedAt && current.UpdatedAt !== remote.updatedAt) {
+          remote.status = "conflict";
+          notifyRemote();
+          return;
+        }
+      }
+      const digest = await getFormDigest();
+      const now = new Date().toISOString();
+      const writeUrl = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})`;
+      const res = await fetch(writeUrl, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Accept": "application/json;odata=nometadata",
+          "Content-Type": "application/json;odata=nometadata",
+          "X-HTTP-Method": "MERGE",
+          "IF-MATCH": "*",
+          "X-RequestDigest": digest,
+        },
+        body: JSON.stringify({ StateJson: JSON.stringify(storeCache), UpdatedAt: now }),
+      });
+      if (res.ok || res.status === 204) {
+        remote.updatedAt = now;
         remote.status = "connected";
       } else {
         remote.status = "offline";
@@ -1691,10 +1721,14 @@ const pushRemoteState = () => {
 async function checkRemoteFreshness() {
   if (!remote.enabled) return;
   try {
-    const res = await fetch(REMOTE_GET_ENDPOINT);
+    const url = `${SP_BASE}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items(${SP_ITEM_ID})?$select=UpdatedAt`;
+    const res = await fetch(url, {
+      credentials: "include",
+      headers: { "Accept": "application/json;odata=nometadata" },
+    });
     if (!res.ok) return;
     const body = await res.json();
-    if (body.updatedAt && remote.updatedAt && body.updatedAt !== remote.updatedAt) {
+    if (body.UpdatedAt && remote.updatedAt && body.UpdatedAt !== remote.updatedAt) {
       remote.status = "conflict";
       notifyRemote();
     }
