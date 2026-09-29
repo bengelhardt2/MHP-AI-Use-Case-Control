@@ -101,92 +101,9 @@
           "lastRelease": "",
           "lastBackupTest": ""
         }
-      },
-      {
-        "id": "UC-002",
-        "name": "",
-        "shortDescription": "Test 123",
-        "businessProblem": "",
-        "solution": "",
-        "businessValue": "",
-        "domain": "Sales",
-        "businessOwner": "",
-        "productOwner": "",
-        "technicalOwner": "",
-        "status": "Idea",
-        "maturity": 0,
-        "aiUsed": true,
-        "exposure": "Internal",
-        "reusable": false,
-        "strategicRelevance": "Medium",
-        "complexity": 50,
-        "valueScore": 50,
-        "riskLevel": "Low",
-        "lifecycleCurrent": "IDEA",
-        "lifecycleDone": [],
-        "cost": {
-          "build": 0,
-          "runAnnual": 0,
-          "cloud": 0,
-          "ai": 0,
-          "maintenance": 0
-        },
-        "value": {
-          "directRevenue": 0,
-          "influencedRevenue": 0,
-          "pipeline": 0,
-          "costSavings": 0,
-          "costAvoidance": 0
-        },
-        "tech": {
-          "cloud": "Azure",
-          "hosting": "",
-          "appType": "",
-          "database": "",
-          "container": "Docker",
-          "repository": "GitHub Enterprise",
-          "cicd": "GitHub Actions",
-          "idp": "Microsoft Entra ID",
-          "aiProvider": "",
-          "model": "",
-          "apis": [],
-          "interfaces": []
-        },
-        "gov": {
-          "dataClassification": "Internal",
-          "personalData": false,
-          "confidentialData": false,
-          "customerData": false,
-          "internetExposure": false,
-          "businessCriticality": "Low",
-          "securityRisk": "Low",
-          "securityReviewed": false,
-          "dataProtectionReviewed": false,
-          "legalReviewed": false,
-          "aiGovernanceReviewed": false,
-          "architectureApproved": false,
-          "aiActClass": "noch nicht bewertet",
-          "lastReview": "—",
-          "nextReview": "—"
-        },
-        "ops": {
-          "serviceOwner": "—",
-          "supportTeam": "—",
-          "sla": "—",
-          "availabilityTarget": "—",
-          "monitoring": "—",
-          "alerting": "—",
-          "backup": "—",
-          "recovery": "—",
-          "patchManagement": "—",
-          "vulnerabilityManagement": "—",
-          "incidentManagement": "—",
-          "lastRelease": "—",
-          "lastBackupTest": "—"
-        }
       }
     ],
-    "savedAt": "2026-09-29T13:07:26.811Z",
+    "savedAt": "2026-09-29T13:07:30.772Z",
     "deployments": [
       {
         "id": "DP-001",
@@ -358,6 +275,17 @@
     ],
     "retirementLog": [
       {
+        "id": "UC-002",
+        "name": "",
+        "domain": "Sales",
+        "maturity": 0,
+        "date": "2026-09-29",
+        "category": "Kein nachweisbarer Business Value",
+        "reason": "-",
+        "deployments": 0,
+        "sources": 0
+      },
+      {
         "id": "UC-003",
         "name": "Niklas Test",
         "domain": "Sales",
@@ -392,5 +320,5 @@
       }
     ]
   },
-  "updatedAt": "2026-09-29T13:07:28.012Z"
+  "updatedAt": "2026-09-29T13:07:31.974Z"
 }
