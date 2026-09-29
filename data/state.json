@@ -1,4 +1,192 @@
 {
-  "state": {},
-  "updatedAt": null
+  "state": {
+    "useCases": [
+      {
+        "id": "UC-001",
+        "name": "Tender Crawler",
+        "shortDescription": "Automatisiertes Monitoring öffentlicher Ausschreibungsplattformen zur Identifikation relevanter Geschäftsmöglichkeiten.",
+        "businessProblem": "Relevante öffentliche Ausschreibungen werden über Dutzende Plattformen verteilt veröffentlicht. Die manuelle Sichtung kostet Vertriebskapazität und Fristen werden regelmäßig zu spät erkannt.",
+        "solution": "Ein Crawler überwacht registrierte Vergabeplattformen, normalisiert Ausschreibungen und bewertet sie per LLM auf Relevanz, Passung zum Leistungsportfolio und Fristendruck. Treffer werden im Vertrieb als Lead ausgespielt.",
+        "businessValue": "Frühere Kenntnis relevanter Ausschreibungen, höhere Trefferquote im Public Sector, deutlich reduzierter manueller Suchaufwand.",
+        "domain": "Sales",
+        "businessOwner": "",
+        "productOwner": "Bastian Engelhardt-Köppen",
+        "technicalOwner": "Nils Hyoma",
+        "status": "Production",
+        "maturity": 3,
+        "aiUsed": true,
+        "exposure": "Internal",
+        "reusable": true,
+        "strategicRelevance": "High",
+        "complexity": null,
+        "valueScore": null,
+        "riskLevel": "Medium",
+        "lifecycleCurrent": "OPERATE",
+        "lifecycleDone": [
+          "IDEA",
+          "POC",
+          "ASSESS",
+          "ARCH",
+          "ENG",
+          "BUILD",
+          "VALIDATE",
+          "APPROVE",
+          "PROD"
+        ],
+        "cost": {
+          "build": null,
+          "runAnnual": null,
+          "cloud": null,
+          "ai": null,
+          "maintenance": null
+        },
+        "value": {
+          "directRevenue": null,
+          "influencedRevenue": null,
+          "pipeline": null,
+          "costSavings": null,
+          "costAvoidance": null
+        },
+        "tech": {
+          "cloud": "Azure",
+          "hosting": "Azure Container Apps",
+          "appType": "Web App + Scheduled Worker",
+          "database": "PostgreSQL (Azure Flexible Server)",
+          "container": "Docker",
+          "repository": "GitHub Enterprise",
+          "cicd": "GitHub Actions",
+          "idp": "Microsoft Entra ID",
+          "aiProvider": "Azure OpenAI",
+          "model": "GPT-4o / text-embedding-3-large",
+          "apis": [
+            "TED REST API",
+            "Vergabe DTVP",
+            "Internal CRM API"
+          ],
+          "interfaces": [
+            "CRM (Lead-Anlage)",
+            "Microsoft Teams (Benachrichtigung)",
+            "Power BI (Reporting)"
+          ]
+        },
+        "gov": {
+          "dataClassification": "Public / Internal",
+          "personalData": false,
+          "confidentialData": false,
+          "customerData": false,
+          "internetExposure": true,
+          "businessCriticality": "Medium",
+          "securityRisk": "Medium",
+          "securityReviewed": true,
+          "dataProtectionReviewed": true,
+          "legalReviewed": true,
+          "aiGovernanceReviewed": true,
+          "architectureApproved": true,
+          "aiActClass": "Minimal Risk",
+          "lastReview": "",
+          "nextReview": ""
+        },
+        "ops": {
+          "serviceOwner": "Nils Hyoma",
+          "supportTeam": "",
+          "sla": "",
+          "availabilityTarget": "",
+          "monitoring": "Azure Monitor",
+          "alerting": "Microsoft Teams",
+          "backup": "",
+          "recovery": "",
+          "patchManagement": "",
+          "vulnerabilityManagement": "",
+          "incidentManagement": "",
+          "lastRelease": "",
+          "lastBackupTest": ""
+        }
+      },
+      {
+        "id": "UC-002",
+        "name": "",
+        "shortDescription": "Test 123",
+        "businessProblem": "",
+        "solution": "",
+        "businessValue": "",
+        "domain": "Sales",
+        "businessOwner": "",
+        "productOwner": "",
+        "technicalOwner": "",
+        "status": "Idea",
+        "maturity": 0,
+        "aiUsed": true,
+        "exposure": "Internal",
+        "reusable": false,
+        "strategicRelevance": "Medium",
+        "complexity": 50,
+        "valueScore": 50,
+        "riskLevel": "Low",
+        "lifecycleCurrent": "IDEA",
+        "lifecycleDone": [],
+        "cost": {
+          "build": 0,
+          "runAnnual": 0,
+          "cloud": 0,
+          "ai": 0,
+          "maintenance": 0
+        },
+        "value": {
+          "directRevenue": 0,
+          "influencedRevenue": 0,
+          "pipeline": 0,
+          "costSavings": 0,
+          "costAvoidance": 0
+        },
+        "tech": {
+          "cloud": "Azure",
+          "hosting": "",
+          "appType": "",
+          "database": "",
+          "container": "Docker",
+          "repository": "GitHub Enterprise",
+          "cicd": "GitHub Actions",
+          "idp": "Microsoft Entra ID",
+          "aiProvider": "",
+          "model": "",
+          "apis": [],
+          "interfaces": []
+        },
+        "gov": {
+          "dataClassification": "Internal",
+          "personalData": false,
+          "confidentialData": false,
+          "customerData": false,
+          "internetExposure": false,
+          "businessCriticality": "Low",
+          "securityRisk": "Low",
+          "securityReviewed": false,
+          "dataProtectionReviewed": false,
+          "legalReviewed": false,
+          "aiGovernanceReviewed": false,
+          "architectureApproved": false,
+          "aiActClass": "noch nicht bewertet",
+          "lastReview": "—",
+          "nextReview": "—"
+        },
+        "ops": {
+          "serviceOwner": "—",
+          "supportTeam": "—",
+          "sla": "—",
+          "availabilityTarget": "—",
+          "monitoring": "—",
+          "alerting": "—",
+          "backup": "—",
+          "recovery": "—",
+          "patchManagement": "—",
+          "vulnerabilityManagement": "—",
+          "incidentManagement": "—",
+          "lastRelease": "—",
+          "lastBackupTest": "—"
+        }
+      }
+    ],
+    "savedAt": "2026-09-29T13:03:45.122Z"
+  },
+  "updatedAt": "2026-09-29T13:03:46.331Z"
 }
