@@ -1539,7 +1539,7 @@ const writeStore = (patch) => {
     try { window.localStorage.setItem(STORE_KEY, JSON.stringify(storeCache)); } catch (e) { /* Speicher voll */ }
   }
   storeListeners.forEach((fn) => fn(storeCache.savedAt));
-  pushRemoteState();
+  schedulePush();
 };
 
 /**
@@ -1558,9 +1558,22 @@ function usePersisted(key, seed, revive) {
   const initial = useRef(true);
   useEffect(() => {
     if (initial.current) { initial.current = false; return; }
+    if (same(value, storeCache[key])) return; // Änderung kam vom gemeinsamen Stand
     writeStore({ [key]: value });
   }, [key, value]);
-  return [value, setValue];
+
+  useEffect(() => {
+    const fn = (v) => { try { setValue(revive ? revive(v) : v); } catch (e) { /* ungültiger Stand */ } };
+    if (!keyListeners.has(key)) keyListeners.set(key, new Set());
+    keyListeners.get(key).add(fn);
+    return () => keyListeners.get(key).delete(fn);
+  }, [key]);
+
+  const set = useCallback((upd) => setValue((prev) => {
+    const next = typeof upd === "function" ? upd(prev) : upd;
+    return AUDITED_KEYS.has(key) ? stampAudit(prev, next) : next;
+  }), [key]);
+  return [value, set];
 }
 
 /* Lifecycle-Phasen tragen eine Icon-Komponente. Die überlebt JSON nicht und
@@ -1603,144 +1616,404 @@ const importStore = (file, onError) => {
   reader.readAsText(file);
 };
 
-/* -----------------------------------------------------------------------------
- * GETEILTER STAND ÜBER GITHUB API
- * data/state.json im privaten GitHub-Repo dient als gemeinsame Datenbank.
- * GitHub-API unterstützt CORS und funktioniert aus jedem Browser – auch aus
- * SharePoints iframe.
+/* =============================================================================
+ * 4.2 GEMEINSAMER STAND
+ * -----------------------------------------------------------------------------
+ * Zwei austauschbare Backends mit derselben Schnittstelle:
  *
- * ⚠️  GH_TOKEN vor dem Upload zu SharePoint einsetzen.
- *     Token erstellen: github.com/settings/tokens → repo-Scope
- * -------------------------------------------------------------------------- */
-const GH_OWNER  = "bengelhardt2";
-const GH_REPO   = "MHP-AI-Use-Case-Control";
-const GH_FILE   = "data/state.json";
-const GH_BRANCH = "main";
+ *   githubBackend  Produktivbetrieb auf GitHub Pages. Der Stand liegt als
+ *                  data/state.json auf dem Branch "data" – bewusst nicht auf
+ *                  main, damit Speichern keinen Pages-Build auslöst. Jede
+ *                  Speicherung ist ein Commit mit Autor → Historie in Git.
+ *   serverBackend  Lokale Entwicklung mit server.py (/api/state), damit
+ *                  Tests nicht die echten Daten verändern.
+ *
+ *   identity() → { id, name, canWrite } | { invalid: true } | null
+ *   load()     → { state, version }
+ *   save(state, version, meta) → { ok, version } | { conflict } | { error }
+ *
+ * Gleichzeitiges Arbeiten: Jede Seite merkt sich den zuletzt abgeglichenen
+ * Stand (Basis). Hat jemand anderes inzwischen gespeichert, werden Basis,
+ * eigener und fremder Stand per Drei-Wege-Merge zusammengeführt – auf Ebene
+ * einzelner Einträge und Felder. Nur wenn zwei Personen dasselbe Feld
+ * desselben Eintrags ändern, gewinnt die zuletzt speichernde.
+ * ============================================================================= */
+const GH = { owner: "bengelhardt2", repo: "MHP-AI-Use-Case-Control", branch: "data", file: "data/state.json" };
+const GH_API = `https://api.github.com/repos/${GH.owner}/${GH.repo}`;
+const TOKEN_KEY = "mhp_ai_gh_token";
+const ASKED_KEY = `${TOKEN_KEY}.asked`;
+const SYNC_KEY = `${STORE_KEY}.sync`;
+const POLL_MS = 15000;
+const POLL_READONLY_MS = 5 * 60000; // ohne Token gilt GitHubs Limit von 60 Abrufen/Stunde je IP
 
-// Token aus localStorage lesen; beim ersten Besuch wird ein Dialog gezeigt
-const _LS_TOKEN_KEY = "mhp_ai_gh_token";
-let GH_TOKEN = localStorage.getItem(_LS_TOKEN_KEY) || "";
+const lsGet = (k) => { try { return storageAvailable ? window.localStorage.getItem(k) : null; } catch (e) { return null; } };
+const lsSet = (k, v) => { try { if (storageAvailable) window.localStorage.setItem(k, v); } catch (e) { /* Speicher voll */ } };
+const lsDel = (k) => { try { if (storageAvailable) window.localStorage.removeItem(k); } catch (e) {} };
 
-function _promptForToken() {
-  const existing = localStorage.getItem(_LS_TOKEN_KEY) || "";
-  const t = window.prompt(
-    "GitHub Access Token eingeben (wird nur in deinem Browser gespeichert):\n\n" +
-    "Token erstellen: github.com/settings/tokens → repo-Scope\n" +
-    "Du wirst nur einmalig gefragt.",
-    existing
-  );
-  if (t && t.trim()) {
-    GH_TOKEN = t.trim();
-    localStorage.setItem(_LS_TOKEN_KEY, GH_TOKEN);
+const b64decode = (b64) =>
+  new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\n/g, "")), (c) => c.charCodeAt(0)));
+const b64encode = (str) => {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+
+const githubBackend = {
+  kind: "github",
+  token: () => lsGet(TOKEN_KEY) || "",
+  headers() {
+    const t = this.token();
+    return { Accept: "application/vnd.github+json", ...(t ? { Authorization: `Bearer ${t}` } : {}) };
+  },
+  async identity() {
+    if (!this.token()) return null;
+    const res = await fetch("https://api.github.com/user", { headers: this.headers(), cache: "no-store" });
+    if (res.status === 401) return { invalid: true };
+    if (!res.ok) return null;
+    const u = await res.json();
+    const repo = await fetch(GH_API, { headers: this.headers(), cache: "no-store" });
+    const perms = repo.ok ? (await repo.json()).permissions || {} : {};
+    return { id: u.login, name: u.name || u.login, canWrite: !!perms.push };
+  },
+  async load() {
+    const res = await fetch(`${GH_API}/contents/${GH.file}?ref=${GH.branch}`, { headers: this.headers(), cache: "no-store" });
+    if (res.status === 404) return { state: {}, version: null };
+    if (!res.ok) throw new Error(`load ${res.status}`);
+    const d = await res.json();
+    let content = d.content;
+    /* Die Contents-API liefert den Inhalt nur bis 1 MB mit, darüber per Blob. */
+    if (!content) content = (await (await fetch(d.git_url, { headers: this.headers(), cache: "no-store" })).json()).content;
+    return { state: JSON.parse(b64decode(content)).state || {}, version: d.sha };
+  },
+  async save(state, version, meta) {
+    const doc = { state, updatedAt: meta.at, updatedBy: meta.by };
+    const res = await fetch(`${GH_API}/contents/${GH.file}`, {
+      method: "PUT",
+      cache: "no-store",
+      headers: { ...this.headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: meta.message,
+        branch: GH.branch,
+        content: b64encode(JSON.stringify(doc, null, 2)),
+        ...(version ? { sha: version } : {}),
+      }),
+    });
+    if (res.ok) return { ok: true, version: (await res.json()).content.sha };
+    if (res.status === 409 || res.status === 422) return { conflict: true };
+    return { error: res.status };
+  },
+};
+
+const serverBackend = {
+  kind: "server",
+  async identity() {
+    const res = await fetch("/.auth/me", { cache: "no-store" });
+    if (!res.ok) return null;
+    const p = (await res.json()).clientPrincipal;
+    return p ? { id: p.userDetails, name: p.userDetails, canWrite: true } : null;
+  },
+  async load() {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error(`load ${res.status}`);
+    const d = await res.json();
+    return { state: d.state || {}, version: d.updatedAt || null };
+  },
+  async save(state, version) {
+    const res = await fetch("/api/state", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state, baseUpdatedAt: version }),
+    });
+    if (res.ok) return { ok: true, version: (await res.json()).updatedAt };
+    if (res.status === 409) return { conflict: true };
+    return { error: res.status };
+  },
+};
+
+const pickBackend = () =>
+  window.location.protocol === "file:" || window.location.hostname.endsWith("github.io")
+    ? githubBackend
+    : serverBackend;
+
+/* --- Drei-Wege-Merge -------------------------------------------------------- */
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const hasUniqueIds = (arr) =>
+  arr.every((x) => isObj(x) && x.id != null) && new Set(arr.map((x) => x.id)).size === arr.length;
+
+/* Nächste freie ID im selben Schema, z. B. UC-007 → UC-012 */
+const freeId = (id, list) => {
+  const m = String(id).match(/^(.*?)(\d+)$/);
+  if (!m) return `${id}-${Date.now().toString(36)}`;
+  const max = list.reduce((n, x) => {
+    const mm = String(x.id).match(/(\d+)$/);
+    return mm ? Math.max(n, Number(mm[1])) : n;
+  }, 0);
+  return m[1] + String(max + 1).padStart(m[2].length, "0");
+};
+
+function mergeArrays(base, local, remote) {
+  if (hasUniqueIds(base) && hasUniqueIds(local) && hasUniqueIds(remote)) {
+    const byId = (arr) => new Map(arr.map((x) => [x.id, x]));
+    const B = byId(base), L = byId(local), R = byId(remote);
+    const out = [];
+    const collided = [];
+    /* Reihenfolge des eigenen Stands, fremde Neuzugänge hinter ihrem Vorgänger */
+    for (const l of local) {
+      const r = R.get(l.id), b = B.get(l.id);
+      if (r) {
+        /* Beide haben unabhängig einen neuen Eintrag mit derselben ID angelegt */
+        if (!b && !same(l, r)) { out.push(r); collided.push(l); }
+        else out.push(merge3(b, l, r));
+      } else if (!b || !same(b, l)) {
+        out.push(l); // lokal neu, oder lokal geändert während fremd gelöscht
+      }
+    }
+    remote.forEach((r, i) => {
+      if (L.has(r.id)) return;
+      const b = B.get(r.id);
+      if (b && same(b, r)) return; // lokal gelöscht
+      const prevId = i > 0 ? remote[i - 1].id : undefined;
+      const at = prevId === undefined ? -1 : out.findIndex((x) => x.id === prevId);
+      out.splice(at + 1, 0, r);
+    });
+    for (const l of collided) out.push({ ...l, id: freeId(l.id, out) });
+    return out;
   }
+  /* Einträge ohne eindeutige ID (z. B. Protokolle) werden als Menge behandelt */
+  const key = (x) => JSON.stringify(x);
+  const bk = new Set(base.map(key)), lk = new Set(local.map(key)), rk = new Set(remote.map(key));
+  const remoteAdded = remote.filter((x) => !bk.has(key(x)) && !lk.has(key(x)));
+  const localKept = local.filter((x) => rk.has(key(x)) || !bk.has(key(x)));
+  return [...remoteAdded, ...localKept];
 }
 
-let _ghSha = null;  // SHA der zuletzt gelesenen Datei (für konfliktfreies Schreiben)
+function merge3(base, local, remote) {
+  if (same(local, remote)) return local;
+  if (same(local, base)) return remote;
+  if (same(remote, base)) return local;
+  if (Array.isArray(local) && Array.isArray(remote)) {
+    return mergeArrays(Array.isArray(base) ? base : [], local, remote);
+  }
+  if (isObj(local) && isObj(remote)) {
+    const b = isObj(base) ? base : {};
+    const out = {};
+    for (const k of new Set([...Object.keys(remote), ...Object.keys(local)])) {
+      let v;
+      if (k in local && k in remote) v = merge3(b[k], local[k], remote[k]);
+      else if (k in local) v = k in b && same(b[k], local[k]) ? undefined : local[k];
+      else v = k in b && same(b[k], remote[k]) ? undefined : remote[k];
+      if (v !== undefined) out[k] = v;
+    }
+    return out;
+  }
+  return local;
+}
 
-const _ghHeaders = () => ({
-  Authorization: `token ${GH_TOKEN}`,
-  Accept: "application/vnd.github.v3+json",
-  "Content-Type": "application/json",
-});
+/* --- Audit: wer hat einen Eintrag angelegt bzw. zuletzt geändert ------------ */
+const AUDITED_KEYS = new Set(["useCases", "deployments", "sources", "retirementLog"]);
 
+function stampAudit(prev, next) {
+  const who = remote.user && remote.user.name;
+  if (!who || !Array.isArray(prev) || !Array.isArray(next) || prev === next) return next;
+  const unchanged = new Set(prev);
+  const before = hasUniqueIds(prev) ? new Map(prev.map((x) => [x.id, x])) : new Map();
+  const at = new Date().toISOString();
+  return next.map((x) => {
+    if (!isObj(x) || unchanged.has(x)) return x;
+    const old = x.id != null ? before.get(x.id) : undefined;
+    if (old && same(old, x)) return x;
+    if (old) return { ...x, updatedBy: who, updatedAt: at };
+    return { createdBy: who, createdAt: at, ...x, updatedBy: who, updatedAt: at };
+  });
+}
+
+/* --- Synchronisation ------------------------------------------------------- */
 const remote = {
-  enabled: false,
-  updatedAt: null,
+  enabled: false,    // Backend erreichbar
+  canWrite: false,   // Schreibrecht (GitHub: Collaborator)
+  status: "local",   // local | connected | saving | readonly | offline | unauthorized
   user: null,
-  status: "local",
+  kind: null,
+  updatedAt: null,
 };
 const remoteListeners = [];
 const notifyRemote = () => remoteListeners.forEach((fn) => fn({ ...remote }));
+const setStatus = (s) => { if (remote.status !== s) { remote.status = s; notifyRemote(); } };
 
-/* GitHub-Benutzername als Identität */
-async function loadIdentity() {
-  try {
-    if (!GH_TOKEN || GH_TOKEN.startsWith("GITHUB_TOKEN")) { _promptForToken(); }
-    if (!GH_TOKEN || GH_TOKEN.startsWith("GITHUB_TOKEN")) return null;
-    const res = await fetch("https://api.github.com/user", { headers: _ghHeaders() });
-    if (!res.ok) return null;
-    const d = await res.json();
-    return { name: d.name || d.login || "angemeldet", roles: ["authenticated"] };
-  } catch (e) { return null; }
-}
-
-/* Gemeinsamen Stand aus state.json laden */
-async function loadRemoteState() {
-  try {
-    if (GH_TOKEN.startsWith("GITHUB_TOKEN")) return null;
-    const res = await fetch(
-      `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}?ref=${GH_BRANCH}`,
-      { headers: _ghHeaders() }
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    _ghSha = data.sha;
-    const content = JSON.parse(decodeURIComponent(escape(atob(data.content.replace(/\n/g, "")))));
-    remote.enabled = true;
-    remote.status = "connected";
-    remote.updatedAt = content.updatedAt || null;
-    return content.state || {};
-  } catch (e) { return null; }
-}
-
-/* Schreiben wird gebündelt: viele kleine Änderungen ergeben eine Anfrage. */
+let backend = null;
+let syncBase = {};        // zuletzt mit dem Backend abgeglichener Stand
+let syncVersion = null;   // dessen Version (GitHub: Datei-SHA, server.py: updatedAt)
+let busy = false;
+let pushWanted = false;
 let pushTimer = null;
-const pushRemoteState = () => {
-  if (!remote.enabled) return;
-  clearTimeout(pushTimer);
-  pushTimer = setTimeout(async () => {
-    try {
-      const now  = new Date().toISOString();
-      const body = JSON.stringify({ state: storeCache, updatedAt: now }, null, 2);
-      const encoded = btoa(unescape(encodeURIComponent(body)));
-      const res = await fetch(
-        `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`,
-        {
-          method: "PUT",
-          headers: _ghHeaders(),
-          body: JSON.stringify({
-            message: `Dashboard-Update ${now}`,
-            content: encoded,
-            sha: _ghSha,
-            branch: GH_BRANCH,
-          }),
-        }
-      );
-      if (res.status === 409) {
-        remote.status = "conflict";   // jemand anderes war schneller
-      } else if (res.ok) {
-        const d = await res.json();
-        _ghSha = d.content.sha;
-        remote.updatedAt = now;
-        remote.status = "connected";
-      } else {
-        remote.status = "offline";
-      }
-    } catch (e) { remote.status = "offline"; }
-    notifyRemote();
-  }, 1200);
-};
+let pollTimer = null;
 
-/* Prüfen ob jemand anderes den Stand verändert hat */
-async function checkRemoteFreshness() {
-  if (!remote.enabled) return;
-  try {
-    const res = await fetch(
-      `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}?ref=${GH_BRANCH}`,
-      { headers: _ghHeaders() }
-    );
-    if (!res.ok) return;
-    const d = await res.json();
-    if (d.sha && _ghSha && d.sha !== _ghSha) {
-      remote.status = "conflict";
-      notifyRemote();
+const keyListeners = new Map(); // Zustandsschlüssel → Setter der usePersisted-Hooks
+
+const sharedState = () => {
+  const { savedAt, ...rest } = storeCache;
+  return rest;
+};
+const persistSync = () => lsSet(SYNC_KEY, JSON.stringify({ kind: backend.kind, base: syncBase, version: syncVersion }));
+
+/* Stand von außen übernehmen und die betroffenen Ansichten aktualisieren */
+function applyShared(next) {
+  const prev = storeCache;
+  storeCache = { ...next, savedAt: prev.savedAt };
+  lsSet(STORE_KEY, JSON.stringify(storeCache));
+  for (const [k, fns] of keyListeners) {
+    if (next[k] !== undefined && !same(prev[k], next[k])) fns.forEach((fn) => fn(next[k]));
+  }
+}
+
+const changedKeys = (a, b) =>
+  [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => !same(a[k], b[k]));
+
+async function exclusive(fn) {
+  if (busy) return;
+  busy = true;
+  try { await fn(); }
+  catch (e) { setStatus("offline"); }
+  finally {
+    busy = false;
+    if (pushWanted && remote.status !== "offline") schedulePush(); // offline: der nächste poll() versucht es erneut
+  }
+}
+
+async function pull() {
+  const { state, version } = await backend.load();
+  if (version !== syncVersion) {
+    const merged = merge3(syncBase, sharedState(), state);
+    syncBase = state;
+    syncVersion = version;
+    persistSync();
+    applyShared(merged);
+  }
+  if (!same(sharedState(), syncBase) && remote.canWrite) pushWanted = true;
+}
+
+async function push() {
+  pushWanted = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const snapshot = sharedState();
+    if (same(snapshot, syncBase)) { setStatus("connected"); return; }
+    setStatus("saving");
+    const keys = changedKeys(syncBase, snapshot);
+    const who = (remote.user && remote.user.name) || "unbekannt";
+    const res = await backend.save(snapshot, syncVersion, {
+      at: new Date().toISOString(),
+      by: who,
+      message: `${who}: ${keys.join(", ")}`,
+    });
+    if (res.ok) {
+      syncBase = snapshot;
+      syncVersion = res.version;
+      remote.updatedAt = new Date().toISOString();
+      persistSync();
+      setStatus("connected");
+      if (!same(sharedState(), syncBase)) pushWanted = true;
+      return;
     }
-  } catch (e) { /* offline */ }
+    if (res.conflict) { await pull(); continue; }
+    if (res.error === 401) { remote.canWrite = false; setStatus("unauthorized"); return; }
+    if (res.error === 403 || res.error === 404) { remote.canWrite = false; setStatus("readonly"); return; }
+    setStatus("offline");
+    return;
+  }
+  pushWanted = true; // mehrfach überholt – beim nächsten Durchlauf erneut versuchen
+}
+
+function schedulePush() {
+  if (!remote.enabled || !remote.canWrite) return;
+  pushWanted = true;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => exclusive(push), 1200);
+}
+
+async function poll() {
+  if (document.hidden) return;
+  await exclusive(async () => {
+    await pull();
+    if (remote.status === "offline") setStatus(remote.canWrite ? "connected" : "readonly");
+  });
+}
+
+function askForToken() {
+  const t = window.prompt(
+    "GitHub Personal Access Token eingeben.\n\n" +
+    "Er bleibt nur in diesem Browser gespeichert und bestimmt, unter welchem Namen du arbeitest.\n" +
+    "Erstellen: github.com/settings/tokens → Tokens (classic) → Scope „repo“.\n\n" +
+    "Abbrechen = nur lesen.",
+    ""
+  );
+  if (t && t.trim()) lsSet(TOKEN_KEY, t.trim());
+  return !!(t && t.trim());
+}
+
+function signIn() {
+  if (askForToken()) window.location.reload();
+}
+
+function signOut() {
+  if (!window.confirm("Abmelden? Der Token wird aus diesem Browser entfernt.")) return;
+  lsDel(TOKEN_KEY);
+  window.location.reload();
+}
+
+/* Vor dem ersten Rendern: Identität klären, gemeinsamen Stand laden und mit
+ * dem lokalen Stand zusammenführen. Ohne erreichbares Backend bleibt alles lokal. */
+async function initRemote() {
+  backend = pickBackend();
+  remote.kind = backend.kind;
+
+  if (backend === githubBackend && !githubBackend.token() && !lsGet(ASKED_KEY)) {
+    lsSet(ASKED_KEY, "1"); // danach nur noch über „Anmelden“
+    askForToken();
+  }
+  let user = await backend.identity().catch(() => null);
+  if (user && user.invalid) {
+    lsDel(TOKEN_KEY);
+    window.alert("Der gespeicherte GitHub-Token ist ungültig oder abgelaufen.");
+    user = askForToken() ? await backend.identity().catch(() => null) : null;
+    if (user && user.invalid) { lsDel(TOKEN_KEY); user = null; }
+  }
+
+  let loaded;
+  try { loaded = await backend.load(); }
+  catch (e) { return; }
+
+  const saved = (() => { try { return JSON.parse(lsGet(SYNC_KEY) || "null"); } catch (e) { return null; } })();
+  const local = sharedState();
+  const merged = saved && saved.kind === backend.kind && saved.base
+    ? merge3(saved.base, local, loaded.state)
+    : { ...local, ...loaded.state };
+
+  syncBase = loaded.state;
+  syncVersion = loaded.version;
+  persistSync();
+  storeCache = { ...merged, savedAt: storeCache.savedAt };
+  lsSet(STORE_KEY, JSON.stringify(storeCache));
+
+  remote.enabled = true;
+  remote.user = user;
+  remote.canWrite = !!(user && user.canWrite);
+  remote.status = remote.canWrite ? "connected" : "readonly";
+  notifyRemote();
+
+  if (remote.canWrite && !same(sharedState(), syncBase)) schedulePush();
+  pollTimer = setInterval(poll, backend === githubBackend && !githubBackend.token() ? POLL_READONLY_MS : POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  window.addEventListener("beforeunload", (e) => {
+    if (pushWanted || busy) { e.preventDefault(); e.returnValue = ""; }
+  });
 }
 
 /* Auf den Auslieferungsstand zurücksetzen */
 const resetStore = () => {
-  if (storageAvailable) { try { window.localStorage.removeItem(STORE_KEY); } catch (e) {} }
+  lsDel(STORE_KEY);
+  lsDel(SYNC_KEY); // ohne Basis übernimmt das Neuladen den gemeinsamen Stand, statt ihn zu löschen
   storeCache = {};
   window.location.reload();
 };
@@ -2713,6 +2986,7 @@ function PortfolioView({ useCases, deployments, onOpen, onEdit, onDelete, onAdd,
                   <span style={{ whiteSpace: "normal", display: "block", maxWidth: 420 }}>{r.reason}</span>) },
               { key: "removed", label: "Mit entfernt", render: (r) => (
                   <span style={{ color: T.inkMuted }}>{r.deployments} Deployments · {r.sources} Quellen</span>) },
+              { key: "createdBy", label: "Eingestellt von", render: (r) => r.createdBy || "–" },
             ]}
             rows={retirementLog.map((r, i) => ({ ...r, id: r.id, key: i }))}
           />
@@ -2725,6 +2999,21 @@ function PortfolioView({ useCases, deployments, onOpen, onEdit, onDelete, onAdd,
 /* -----------------------------------------------------------------------------
  * 6.4 USE CASE DETAIL PAGE
  * -------------------------------------------------------------------------- */
+const auditDate = (iso) =>
+  new Date(iso).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+function AuditLine({ item }) {
+  if (!item.createdBy && !item.updatedBy) return null;
+  const changed = item.updatedBy && item.updatedAt !== item.createdAt;
+  return (
+    <p className="text-xs mt-2" style={{ color: T.inkSubtle }}>
+      {item.createdBy && `Angelegt von ${item.createdBy} am ${auditDate(item.createdAt)}`}
+      {item.createdBy && changed && " · "}
+      {changed && `Zuletzt geändert von ${item.updatedBy} am ${auditDate(item.updatedAt)}`}
+    </p>
+  );
+}
+
 function UseCaseDetail({ useCase: u, deployments, onBack, onEdit, onDelete, onAddDeployment }) {
   const [tab, setTab] = useState("overview");
   const mine = deployments.filter((d) => d.useCaseId === u.id);
@@ -2758,6 +3047,7 @@ function UseCaseDetail({ useCase: u, deployments, onBack, onEdit, onDelete, onAd
               </div>
               <h2 className="text-2xl font-semibold mt-1.5" style={{ color: T.ink, letterSpacing: "-0.025em" }}>{u.name}</h2>
               <p className="text-sm mt-1.5 max-w-3xl" style={{ color: T.inkMuted }}>{u.shortDescription}</p>
+              <AuditLine item={u} />
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <StatusBadge status={u.status} />
                 <MaturityBadge level={u.maturity} />
@@ -8291,31 +8581,35 @@ function RemoteStatus() {
   }, []);
   if (!st.enabled && !st.user) return null;
 
+  const readonlyHint = st.user
+    ? "Kein Schreibrecht. Einladung zum GitHub-Repo angenommen? Sonst beim Admin melden."
+    : "Nicht angemeldet – Änderungen werden nicht geteilt.";
   const map = {
-    connected: { color: T.green, soft: T.greenSoft, line: T.greenLine, label: "Gemeinsamer Stand" },
-    offline:   { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Nicht verbunden" },
-    conflict:  { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Neuere Version vorhanden" },
-    local:     { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lokal" },
+    connected:    { color: T.green, soft: T.greenSoft, line: T.greenLine, label: "Gemeinsamer Stand", hint: "Änderungen werden automatisch geteilt" },
+    saving:       { color: T.green, soft: T.greenSoft, line: T.greenLine, label: "Speichert …",       hint: "Änderungen werden übertragen" },
+    readonly:     { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lesen",         hint: readonlyHint },
+    unauthorized: { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Token ungültig",    hint: "Token abgelaufen oder widerrufen – bitte neu anmelden" },
+    offline:      { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Nicht verbunden",   hint: "Änderungen bleiben lokal und werden nachgereicht" },
+    local:        { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lokal",         hint: "Kein gemeinsamer Stand erreichbar" },
   }[st.status] || {};
+  const canSignIn = st.kind === "github" && (!st.user || st.status === "unauthorized");
 
   return (
     <div className="flex items-center gap-2 mr-1">
       {st.user && (
-        <span className="text-xs" style={{ color: T.inkMuted }} title="Angemeldet über MHP Single Sign-on">
+        <button className="text-xs" style={{ color: T.inkMuted }}
+                title={st.kind === "github" ? `Angemeldet über GitHub als ${st.user.id} – klicken zum Abmelden` : "Lokale Entwicklung"}
+                onClick={st.kind === "github" ? signOut : undefined}>
           {st.user.name}
-        </span>
+        </button>
       )}
       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium"
             style={{ borderRadius: R.full, background: map.soft, color: map.color, border: `1px solid ${map.line}` }}
-            title={st.status === "conflict"
-              ? "Jemand anderes hat den Stand verändert. Seite neu laden, um ihn zu übernehmen."
-              : "Verbindung zum gemeinsamen Stand"}>
+            title={map.hint}>
         <span style={{ width: 6, height: 6, borderRadius: R.full, background: map.color }} />
         {map.label}
       </span>
-      {st.status === "conflict" && (
-        <Button size="sm" icon={Repeat} onClick={() => window.location.reload()}>Neu laden</Button>
-      )}
+      {canSignIn && <Button size="sm" onClick={signIn}>Anmelden</Button>}
     </div>
   );
 }
@@ -8429,7 +8723,8 @@ function UseCaseIndustrializationDashboard() {
 
   /* --- CRUD ------------------------------------------------------------ */
   const nextUseCaseId = () => {
-    const n = useCases.reduce((max, u) => Math.max(max, Number((u.id.match(/\d+/) || [0])[0])), 0);
+    /* Eingestellte IDs zählen mit – sonst stünde dieselbe ID im Retirement Log für zwei Use Cases */
+    const n = [...useCases, ...retirementLog].reduce((max, u) => Math.max(max, Number((u.id.match(/\d+/) || [0])[0])), 0);
     return `UC-${String(n + 1).padStart(3, "0")}`;
   };
   const nextDeploymentId = () => {
@@ -8918,16 +9213,7 @@ function MhpAiControl() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    let timer = null;
-    (async () => {
-      const [identity, state] = await Promise.all([loadIdentity(), loadRemoteState()]);
-      if (identity) remote.user = identity;
-      if (state) storeCache = { ...storeCache, ...state };
-      notifyRemote();
-      setReady(true);
-      if (remote.enabled) timer = setInterval(checkRemoteFreshness, 30000);
-    })();
-    return () => { if (timer) clearInterval(timer); };
+    initRemote().catch(() => {}).finally(() => setReady(true));
   }, []);
 
   if (!ready) {
