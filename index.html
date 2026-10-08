@@ -1663,6 +1663,11 @@ const b64encode = (str) => {
   return btoa(bin);
 };
 
+const apiError = async (res) => {
+  const d = await res.json().catch(() => ({}));
+  return `GitHub ${res.status}${d.message ? `: ${d.message}` : ""}`;
+};
+
 const githubBackend = {
   kind: "github",
   token: () => lsGet(TOKEN_KEY) || "",
@@ -1711,7 +1716,7 @@ const githubBackend = {
     const res = await this.writeJson(GH.file, { state, updatedAt: meta.at, updatedBy: meta.by }, meta.message, version);
     if (res.ok) return { ok: true, version: (await res.json()).content.sha };
     if (res.status === 409 || res.status === 422) return { conflict: true };
-    return { error: res.status };
+    return { error: res.status, detail: await apiError(res) };
   },
   /* Versionen liegen als snapshots/<id>.json auf dem data-Branch. Die Liste kommt
    * aus den Commits – deren Nachricht trägt die Metadaten als letzte Zeile (JSON). */
@@ -1719,12 +1724,12 @@ const githubBackend = {
     const meta = { id: snap.id, at: snap.at, by: snap.by, label: snap.label };
     const message = `${snap.by}: Sicherung – ${snap.label || "ohne Bezeichnung"}\n\n${JSON.stringify(meta)}`;
     const res = await this.writeJson(`${GH.snapshots}/${snap.id}.json`, snap, message);
-    if (!res.ok) throw new Error(`snapshot ${res.status}`);
+    if (!res.ok) throw new Error(await apiError(res));
   },
   async listSnapshots() {
     const res = await fetch(`${GH_API}/commits?sha=${GH.branch}&path=${GH.snapshots}&per_page=100`,
                             { headers: this.headers(), cache: "no-store" });
-    if (!res.ok) throw new Error(`list ${res.status}`);
+    if (!res.ok) throw new Error(await apiError(res));
     return (await res.json()).map((c) => {
       try { return JSON.parse(c.commit.message.trim().split("\n").pop()); } catch (e) { return null; }
     }).filter((m) => m && m.id);
@@ -1881,6 +1886,7 @@ const remote = {
   enabled: false,    // Backend erreichbar
   canWrite: false,   // Schreibrecht (GitHub: Collaborator)
   status: "local",   // local | connected | saving | readonly | offline | unauthorized
+  lastError: null,   // Grund des letzten Fehlschlags, für Anzeige und Fehlersuche
   user: null,
   kind: null,
   updatedAt: null,
@@ -1922,7 +1928,10 @@ async function exclusive(fn) {
   if (busy) return;
   busy = true;
   try { await fn(); }
-  catch (e) { setStatus("offline"); }
+  catch (e) {
+    remote.lastError = e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message;
+    setStatus("offline");
+  }
   finally {
     busy = false;
     if (pushWanted && remote.status !== "offline") schedulePush(); // offline: der nächste poll() versucht es erneut
@@ -1965,6 +1974,7 @@ async function push() {
       return;
     }
     if (res.conflict) { await pull(); continue; }
+    remote.lastError = res.detail || `Fehler ${res.error}`;
     if (res.error === 401) { remote.canWrite = false; setStatus("unauthorized"); return; }
     if (res.error === 403 || res.error === 404) { remote.canWrite = false; setStatus("readonly"); return; }
     setStatus("offline");
@@ -1994,6 +2004,7 @@ let pushMessage = null; // abweichende Commit-Nachricht für die nächste Speich
 const whenIdle = async () => { while (busy) await new Promise((r) => setTimeout(r, 100)); };
 const currentUser = () => (remote.user && remote.user.name) || "unbekannt";
 const syncFailed = () => ["offline", "readonly", "unauthorized"].includes(remote.status);
+const failure = () => new Error(remote.lastError || "Keine Verbindung zu GitHub");
 
 /* Sichert den aktuellen gemeinsamen Stand inkl. eigener, noch nicht übertragener
  * Änderungen und der neuesten Änderungen der anderen. */
@@ -2001,7 +2012,7 @@ async function createSnapshot(label) {
   await whenIdle();
   clearTimeout(pushTimer);
   await exclusive(async () => { await pull(); await push(); });
-  if (syncFailed()) throw new Error("Stand konnte nicht übertragen werden");
+  if (syncFailed()) throw failure();
   const at = new Date().toISOString();
   await backend.saveSnapshot({ id: at.replace(/[:.]/g, "-"), at, by: currentUser(), label: label.trim(), state: syncBase });
 }
@@ -2021,7 +2032,7 @@ async function restoreSnapshot(meta) {
     pushMessage = `${currentUser()}: Wiederherstellung – ${snap.label || auditDate(snap.at)}`;
     await push();
   });
-  if (syncFailed()) throw new Error("Stand konnte nicht übertragen werden");
+  if (syncFailed()) throw failure();
 }
 
 function askForToken() {
@@ -6925,11 +6936,12 @@ function SaveVersionModal({ onClose }) {
   const st = useRemoteState();
   const [label, setLabel] = useState("");
   const [phase, setPhase] = useState("idle"); // idle | busy | done | error
+  const [reason, setReason] = useState("");
   const run = async () => {
     if (phase === "busy") return;
     setPhase("busy");
     try { await createSnapshot(label); setPhase("done"); }
-    catch (e) { setPhase("error"); }
+    catch (e) { setReason(e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message); setPhase("error"); }
   };
   const canSignIn = st.kind === "github" && !st.user;
 
@@ -6960,7 +6972,7 @@ function SaveVersionModal({ onClose }) {
                  placeholder="z. B. Stand vor dem Steering Committee" />
           {phase === "error" && (
             <p className="text-xs mt-3" style={{ color: T.red }}>
-              Sichern fehlgeschlagen – keine Verbindung zu GitHub. Bitte später erneut versuchen.
+              Sichern fehlgeschlagen – {reason}
             </p>
           )}
         </>
@@ -6977,7 +6989,7 @@ function VersionsModal({ onClose, onImportFile }) {
   const [doneId, setDoneId] = useState(null);
 
   useEffect(() => {
-    listSnapshots().then(setList, () => setError("Die Versionen konnten nicht geladen werden."));
+    listSnapshots().then(setList, (e) => setError(`Die Versionen konnten nicht geladen werden – ${e.message}`));
   }, []);
 
   const restore = async (m) => {
@@ -6990,7 +7002,7 @@ function VersionsModal({ onClose, onImportFile }) {
     setBusyId(m.id);
     setError(null);
     try { await restoreSnapshot(m); setDoneId(m.id); }
-    catch (e) { setError("Wiederherstellen fehlgeschlagen – keine Verbindung zu GitHub."); }
+    catch (e) { setError(`Wiederherstellen fehlgeschlagen – ${e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message}`); }
     setBusyId(null);
   };
 
@@ -8809,7 +8821,7 @@ function RemoteStatus() {
     saving:       { color: T.green, soft: T.greenSoft, line: T.greenLine, label: "Speichert …",       hint: "Änderungen werden übertragen" },
     readonly:     { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lesen",         hint: readonlyHint },
     unauthorized: { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Token ungültig",    hint: "Token abgelaufen oder widerrufen – bitte neu anmelden" },
-    offline:      { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Nicht verbunden",   hint: "Änderungen bleiben lokal und werden nachgereicht" },
+    offline:      { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Nicht verbunden",   hint: `Änderungen bleiben lokal und werden nachgereicht${st.lastError ? ` (${st.lastError})` : ""}` },
     local:        { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lokal",         hint: "Kein gemeinsamer Stand erreichbar" },
   }[st.status] || {};
   const canSignIn = st.kind === "github" && (!st.user || st.status === "unauthorized");
