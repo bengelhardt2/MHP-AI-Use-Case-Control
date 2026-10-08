@@ -1885,7 +1885,7 @@ function stampAudit(prev, next) {
 const remote = {
   enabled: false,    // Backend erreichbar
   canWrite: false,   // Schreibrecht (GitHub: Collaborator)
-  status: "local",   // local | connected | saving | readonly | offline | unauthorized
+  status: "local",   // local | connected | saving | readonly | forbidden | offline | unauthorized
   lastError: null,   // Grund des letzten Fehlschlags, für Anzeige und Fehlersuche
   user: null,
   kind: null,
@@ -1976,7 +1976,7 @@ async function push() {
     if (res.conflict) { await pull(); continue; }
     remote.lastError = res.detail || `Fehler ${res.error}`;
     if (res.error === 401) { remote.canWrite = false; setStatus("unauthorized"); return; }
-    if (res.error === 403 || res.error === 404) { remote.canWrite = false; setStatus("readonly"); return; }
+    if (res.error === 403 || res.error === 404) { remote.canWrite = false; setStatus("forbidden"); return; }
     setStatus("offline");
     return;
   }
@@ -2003,7 +2003,9 @@ let pushMessage = null; // abweichende Commit-Nachricht für die nächste Speich
 
 const whenIdle = async () => { while (busy) await new Promise((r) => setTimeout(r, 100)); };
 const currentUser = () => (remote.user && remote.user.name) || "unbekannt";
-const syncFailed = () => ["offline", "readonly", "unauthorized"].includes(remote.status);
+const syncFailed = () => ["offline", "readonly", "forbidden", "unauthorized"].includes(remote.status);
+/* Konto ist Collaborator, aber der Token darf nicht schreiben (z. B. fine-grained ohne Contents: write) */
+const isTokenScopeError = (msg) => /^GitHub 40[34]/.test(msg || "");
 const failure = () => new Error(remote.lastError || "Keine Verbindung zu GitHub");
 
 /* Sichert den aktuellen gemeinsamen Stand inkl. eigener, noch nicht übertragener
@@ -2014,7 +2016,12 @@ async function createSnapshot(label) {
   await exclusive(async () => { await pull(); await push(); });
   if (syncFailed()) throw failure();
   const at = new Date().toISOString();
-  await backend.saveSnapshot({ id: at.replace(/[:.]/g, "-"), at, by: currentUser(), label: label.trim(), state: syncBase });
+  try {
+    await backend.saveSnapshot({ id: at.replace(/[:.]/g, "-"), at, by: currentUser(), label: label.trim(), state: syncBase });
+  } catch (e) {
+    if (isTokenScopeError(e.message)) { remote.lastError = e.message; remote.canWrite = false; setStatus("forbidden"); }
+    throw e;
+  }
 }
 
 const listSnapshots = async () =>
@@ -6928,7 +6935,10 @@ function useRemoteState() {
   return st;
 }
 
-const noWriteHint = (st) => st.user
+const TOKEN_HELP = "Dein Token darf nicht schreiben. Erstelle unter github.com/settings/tokens einen Token (classic) " +
+  "mit Scope „repo“ und trage ihn über „Anmelden“ ein.";
+
+const noWriteHint = (st) => st.status === "forbidden" ? TOKEN_HELP : st.user
   ? "Dein Konto hat kein Schreibrecht. Einladung zum GitHub-Repo angenommen? Sonst beim Admin melden."
   : "Dafür musst du angemeldet sein.";
 
@@ -6943,14 +6953,15 @@ function SaveVersionModal({ onClose }) {
     try { await createSnapshot(label); setPhase("done"); }
     catch (e) { setReason(e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message); setPhase("error"); }
   };
-  const canSignIn = st.kind === "github" && !st.user;
+  const tokenIssue = isTokenScopeError(reason) || st.status === "forbidden";
+  const canSignIn = st.kind === "github" && (!st.user || tokenIssue);
 
   return (
     <Modal open onClose={onClose} width={520} title="Version sichern"
            subtitle="Legt den aktuellen gemeinsamen Stand als Version im Git ab. Alle können sie über „Laden“ wiederherstellen."
            footer={phase === "done"
              ? <Button variant="primary" onClick={onClose}>Fertig</Button>
-             : !st.canWrite
+             : !st.canWrite || tokenIssue
                ? <>
                    <Button onClick={onClose}>Schließen</Button>
                    {canSignIn && <Button variant="primary" onClick={signIn}>Anmelden</Button>}
@@ -6959,7 +6970,12 @@ function SaveVersionModal({ onClose }) {
                    <Button onClick={onClose}>Abbrechen</Button>
                    <Button variant="primary" icon={ArrowUpRight} onClick={run}>{phase === "busy" ? "Sichert …" : "Sichern"}</Button>
                  </>}>
-      {!st.canWrite ? (
+      {tokenIssue ? (
+        <>
+          <p className="text-sm" style={{ color: T.ink }}>{TOKEN_HELP}</p>
+          {reason && <p className="text-xs mt-3" style={{ color: T.inkSubtle }}>{reason}</p>}
+        </>
+      ) : !st.canWrite ? (
         <p className="text-sm" style={{ color: T.ink }}>{noWriteHint(st)}</p>
       ) : phase === "done" ? (
         <p className="text-sm" style={{ color: T.ink }}>
@@ -8821,10 +8837,12 @@ function RemoteStatus() {
     saving:       { color: T.green, soft: T.greenSoft, line: T.greenLine, label: "Speichert …",       hint: "Änderungen werden übertragen" },
     readonly:     { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lesen",         hint: readonlyHint },
     unauthorized: { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Token ungültig",    hint: "Token abgelaufen oder widerrufen – bitte neu anmelden" },
+    forbidden:    { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Token ohne Schreibrecht",
+                    hint: `${TOKEN_HELP}${st.lastError ? ` (${st.lastError})` : ""}` },
     offline:      { color: T.amber, soft: T.amberSoft, line: T.amberLine, label: "Nicht verbunden",   hint: `Änderungen bleiben lokal und werden nachgereicht${st.lastError ? ` (${st.lastError})` : ""}` },
     local:        { color: T.slate, soft: T.slateSoft, line: T.slateLine, label: "Nur lokal",         hint: "Kein gemeinsamer Stand erreichbar" },
   }[st.status] || {};
-  const canSignIn = st.kind === "github" && (!st.user || st.status === "unauthorized");
+  const canSignIn = st.kind === "github" && (!st.user || st.status === "unauthorized" || st.status === "forbidden");
 
   return (
     <div className="flex items-center gap-2 mr-1">
