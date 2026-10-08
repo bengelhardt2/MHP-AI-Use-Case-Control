@@ -38,6 +38,15 @@ Drei-Wege-Merge mit den eigenen Änderungen zusammen und speichert erneut – oh
 - Fremde Änderungen erscheinen nach spätestens 15 Sekunden (sofort beim Zurückwechseln in den Tab).
 - Ohne Verbindung bleiben Änderungen im Browser und werden nachgereicht.
 
+### Versionen (Sichern / Laden)
+
+- **Sichern** (unten links) legt den aktuellen gemeinsamen Stand als Version an: `snapshots/<Zeitpunkt>.json`
+  auf dem Branch `data`, mit Person, Zeitpunkt und optionaler Bezeichnung. Vorher werden eigene und fremde
+  Änderungen abgeglichen, die Version enthält also den Stand aller.
+- **Laden** listet alle Versionen. „Wiederherstellen“ setzt den gemeinsamen Stand für alle auf diese Version –
+  als normaler Commit, der vorherige Stand bleibt in der Historie. Die anderen bekommen ihn automatisch.
+- Beides erfordert Anmeldung mit Schreibrecht. Export/Import als Datei gibt es weiterhin im Laden-Dialog.
+
 ### Statusanzeige (oben rechts)
 
 | Anzeige | Bedeutung |
@@ -68,8 +77,8 @@ Wer hat was geändert:
 git fetch origin data && git log --format='%ad  %s' --date=format:'%Y-%m-%d %H:%M' origin/data -- data/state.json
 ```
 
-Stand wiederherstellen: ältere Version von `data/state.json` aus der Historie des Branches `data` zurückspielen,
-oder im Dashboard eine zuvor gesicherte JSON-Datei über „Laden“ einspielen.
+Stand wiederherstellen: im Dashboard über „Laden“ eine Version wählen. Notfalls eine ältere Fassung von
+`data/state.json` aus der Historie des Branches `data` zurückspielen.
 
 > Das Repo ist öffentlich. Keine personenbezogenen oder vertraulichen Daten eintragen.
 

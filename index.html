@@ -1559,11 +1559,15 @@ function usePersisted(key, seed, revive) {
   useEffect(() => {
     if (initial.current) { initial.current = false; return; }
     if (same(value, storeCache[key])) return; // Änderung kam vom gemeinsamen Stand
+    if (storeCache[key] === undefined && value === seed) return;
     writeStore({ [key]: value });
   }, [key, value]);
 
   useEffect(() => {
-    const fn = (v) => { try { setValue(revive ? revive(v) : v); } catch (e) { /* ungültiger Stand */ } };
+    const fn = (v) => {
+      if (v === undefined) { setValue(seed); return; }
+      try { setValue(revive ? revive(v) : v); } catch (e) { /* ungültiger Stand */ }
+    };
     if (!keyListeners.has(key)) keyListeners.set(key, new Set());
     keyListeners.get(key).add(fn);
     return () => keyListeners.get(key).delete(fn);
@@ -1638,7 +1642,7 @@ const importStore = (file, onError) => {
  * einzelner Einträge und Felder. Nur wenn zwei Personen dasselbe Feld
  * desselben Eintrags ändern, gewinnt die zuletzt speichernde.
  * ============================================================================= */
-const GH = { owner: "bengelhardt2", repo: "MHP-AI-Use-Case-Control", branch: "data", file: "data/state.json" };
+const GH = { owner: "bengelhardt2", repo: "MHP-AI-Use-Case-Control", branch: "data", file: "data/state.json", snapshots: "snapshots" };
 const GH_API = `https://api.github.com/repos/${GH.owner}/${GH.repo}`;
 const TOKEN_KEY = "mhp_ai_gh_token";
 const ASKED_KEY = `${TOKEN_KEY}.asked`;
@@ -1676,32 +1680,59 @@ const githubBackend = {
     const perms = repo.ok ? (await repo.json()).permissions || {} : {};
     return { id: u.login, name: u.name || u.login, canWrite: !!perms.push };
   },
-  async load() {
-    const res = await fetch(`${GH_API}/contents/${GH.file}?ref=${GH.branch}`, { headers: this.headers(), cache: "no-store" });
-    if (res.status === 404) return { state: {}, version: null };
-    if (!res.ok) throw new Error(`load ${res.status}`);
+  async readJson(path) {
+    const res = await fetch(`${GH_API}/contents/${path}?ref=${GH.branch}`, { headers: this.headers(), cache: "no-store" });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`read ${res.status}`);
     const d = await res.json();
     let content = d.content;
     /* Die Contents-API liefert den Inhalt nur bis 1 MB mit, darüber per Blob. */
     if (!content) content = (await (await fetch(d.git_url, { headers: this.headers(), cache: "no-store" })).json()).content;
-    return { state: JSON.parse(b64decode(content)).state || {}, version: d.sha };
+    return { doc: JSON.parse(b64decode(content)), sha: d.sha };
   },
-  async save(state, version, meta) {
-    const doc = { state, updatedAt: meta.at, updatedBy: meta.by };
-    const res = await fetch(`${GH_API}/contents/${GH.file}`, {
+  async writeJson(path, doc, message, sha) {
+    return fetch(`${GH_API}/contents/${path}`, {
       method: "PUT",
       cache: "no-store",
       headers: { ...this.headers(), "Content-Type": "application/json" },
       body: JSON.stringify({
-        message: meta.message,
+        message,
         branch: GH.branch,
         content: b64encode(JSON.stringify(doc, null, 2)),
-        ...(version ? { sha: version } : {}),
+        ...(sha ? { sha } : {}),
       }),
     });
+  },
+  async load() {
+    const r = await this.readJson(GH.file);
+    return r ? { state: r.doc.state || {}, version: r.sha } : { state: {}, version: null };
+  },
+  async save(state, version, meta) {
+    const res = await this.writeJson(GH.file, { state, updatedAt: meta.at, updatedBy: meta.by }, meta.message, version);
     if (res.ok) return { ok: true, version: (await res.json()).content.sha };
     if (res.status === 409 || res.status === 422) return { conflict: true };
     return { error: res.status };
+  },
+  /* Versionen liegen als snapshots/<id>.json auf dem data-Branch. Die Liste kommt
+   * aus den Commits – deren Nachricht trägt die Metadaten als letzte Zeile (JSON). */
+  async saveSnapshot(snap) {
+    const meta = { id: snap.id, at: snap.at, by: snap.by, label: snap.label };
+    const message = `${snap.by}: Sicherung – ${snap.label || "ohne Bezeichnung"}\n\n${JSON.stringify(meta)}`;
+    const res = await this.writeJson(`${GH.snapshots}/${snap.id}.json`, snap, message);
+    if (!res.ok) throw new Error(`snapshot ${res.status}`);
+  },
+  async listSnapshots() {
+    const res = await fetch(`${GH_API}/commits?sha=${GH.branch}&path=${GH.snapshots}&per_page=100`,
+                            { headers: this.headers(), cache: "no-store" });
+    if (!res.ok) throw new Error(`list ${res.status}`);
+    return (await res.json()).map((c) => {
+      try { return JSON.parse(c.commit.message.trim().split("\n").pop()); } catch (e) { return null; }
+    }).filter((m) => m && m.id);
+  },
+  async loadSnapshot(id) {
+    const r = await this.readJson(`${GH.snapshots}/${id}.json`);
+    if (!r) throw new Error("not found");
+    return r.doc;
   },
 };
 
@@ -1728,6 +1759,22 @@ const serverBackend = {
     if (res.ok) return { ok: true, version: (await res.json()).updatedAt };
     if (res.status === 409) return { conflict: true };
     return { error: res.status };
+  },
+  async saveSnapshot(snap) {
+    const res = await fetch("/api/snapshots", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(snap),
+    });
+    if (!res.ok) throw new Error(`snapshot ${res.status}`);
+  },
+  async listSnapshots() {
+    const res = await fetch("/api/snapshots", { cache: "no-store" });
+    if (!res.ok) throw new Error(`list ${res.status}`);
+    return res.json();
+  },
+  async loadSnapshot(id) {
+    const res = await fetch(`/api/snapshots/${encodeURIComponent(id)}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`load ${res.status}`);
+    return res.json();
   },
 };
 
@@ -1864,7 +1911,7 @@ function applyShared(next) {
   storeCache = { ...next, savedAt: prev.savedAt };
   lsSet(STORE_KEY, JSON.stringify(storeCache));
   for (const [k, fns] of keyListeners) {
-    if (next[k] !== undefined && !same(prev[k], next[k])) fns.forEach((fn) => fn(next[k]));
+    if (!same(prev[k], next[k])) fns.forEach((fn) => fn(next[k])); // undefined → Ausgangsstand
   }
 }
 
@@ -1905,9 +1952,10 @@ async function push() {
     const res = await backend.save(snapshot, syncVersion, {
       at: new Date().toISOString(),
       by: who,
-      message: `${who}: ${keys.join(", ")}`,
+      message: pushMessage || `${who}: ${keys.join(", ")}`,
     });
     if (res.ok) {
+      pushMessage = null;
       syncBase = snapshot;
       syncVersion = res.version;
       remote.updatedAt = new Date().toISOString();
@@ -1938,6 +1986,42 @@ async function poll() {
     await pull();
     if (remote.status === "offline") setStatus(remote.canWrite ? "connected" : "readonly");
   });
+}
+
+/* --- Versionen (Sichern / Laden) ------------------------------------------- */
+let pushMessage = null; // abweichende Commit-Nachricht für die nächste Speicherung
+
+const whenIdle = async () => { while (busy) await new Promise((r) => setTimeout(r, 100)); };
+const currentUser = () => (remote.user && remote.user.name) || "unbekannt";
+const syncFailed = () => ["offline", "readonly", "unauthorized"].includes(remote.status);
+
+/* Sichert den aktuellen gemeinsamen Stand inkl. eigener, noch nicht übertragener
+ * Änderungen und der neuesten Änderungen der anderen. */
+async function createSnapshot(label) {
+  await whenIdle();
+  clearTimeout(pushTimer);
+  await exclusive(async () => { await pull(); await push(); });
+  if (syncFailed()) throw new Error("Stand konnte nicht übertragen werden");
+  const at = new Date().toISOString();
+  await backend.saveSnapshot({ id: at.replace(/[:.]/g, "-"), at, by: currentUser(), label: label.trim(), state: syncBase });
+}
+
+const listSnapshots = async () =>
+  (await backend.listSnapshots()).sort((a, b) => (a.at < b.at ? 1 : -1));
+
+/* Setzt den gemeinsamen Stand für alle auf eine Version zurück. Das ist ein
+ * normaler Commit – der vorherige Stand bleibt in der Historie erhalten. */
+async function restoreSnapshot(meta) {
+  const snap = await backend.loadSnapshot(meta.id);
+  await whenIdle();
+  clearTimeout(pushTimer);
+  await exclusive(async () => {
+    await pull();
+    applyShared(snap.state || {});
+    pushMessage = `${currentUser()}: Wiederherstellung – ${snap.label || auditDate(snap.at)}`;
+    await push();
+  });
+  if (syncFailed()) throw new Error("Stand konnte nicht übertragen werden");
 }
 
 function askForToken() {
@@ -6819,15 +6903,147 @@ function AiTransformationView({ sub }) {
 }
 
 /* -----------------------------------------------------------------------------
+ * Versionen sichern und laden
+ * Mit gemeinsamem Stand landen Versionen im Git (snapshots/ auf dem data-Branch)
+ * und stehen allen zur Verfügung. Ohne Verbindung bleibt der Export als Datei.
+ * -------------------------------------------------------------------------- */
+function useRemoteState() {
+  const [st, setSt] = useState({ ...remote });
+  useEffect(() => {
+    const fn = (r) => setSt(r);
+    remoteListeners.push(fn);
+    return () => { const i = remoteListeners.indexOf(fn); if (i >= 0) remoteListeners.splice(i, 1); };
+  }, []);
+  return st;
+}
+
+const noWriteHint = (st) => st.user
+  ? "Dein Konto hat kein Schreibrecht. Einladung zum GitHub-Repo angenommen? Sonst beim Admin melden."
+  : "Dafür musst du angemeldet sein.";
+
+function SaveVersionModal({ onClose }) {
+  const st = useRemoteState();
+  const [label, setLabel] = useState("");
+  const [phase, setPhase] = useState("idle"); // idle | busy | done | error
+  const run = async () => {
+    if (phase === "busy") return;
+    setPhase("busy");
+    try { await createSnapshot(label); setPhase("done"); }
+    catch (e) { setPhase("error"); }
+  };
+  const canSignIn = st.kind === "github" && !st.user;
+
+  return (
+    <Modal open onClose={onClose} width={520} title="Version sichern"
+           subtitle="Legt den aktuellen gemeinsamen Stand als Version im Git ab. Alle können sie über „Laden“ wiederherstellen."
+           footer={phase === "done"
+             ? <Button variant="primary" onClick={onClose}>Fertig</Button>
+             : !st.canWrite
+               ? <>
+                   <Button onClick={onClose}>Schließen</Button>
+                   {canSignIn && <Button variant="primary" onClick={signIn}>Anmelden</Button>}
+                 </>
+               : <>
+                   <Button onClick={onClose}>Abbrechen</Button>
+                   <Button variant="primary" icon={ArrowUpRight} onClick={run}>{phase === "busy" ? "Sichert …" : "Sichern"}</Button>
+                 </>}>
+      {!st.canWrite ? (
+        <p className="text-sm" style={{ color: T.ink }}>{noWriteHint(st)}</p>
+      ) : phase === "done" ? (
+        <p className="text-sm" style={{ color: T.ink }}>
+          <CheckCircle2 size={14} style={{ color: T.green, display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
+          Version gesichert{label.trim() ? ` – „${label.trim()}“` : ""}.
+        </p>
+      ) : (
+        <>
+          <Input label="Bezeichnung (optional)" value={label} onChange={setLabel}
+                 placeholder="z. B. Stand vor dem Steering Committee" />
+          {phase === "error" && (
+            <p className="text-xs mt-3" style={{ color: T.red }}>
+              Sichern fehlgeschlagen – keine Verbindung zu GitHub. Bitte später erneut versuchen.
+            </p>
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function VersionsModal({ onClose, onImportFile }) {
+  const st = useRemoteState();
+  const [list, setList] = useState(null);
+  const [error, setError] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [doneId, setDoneId] = useState(null);
+
+  useEffect(() => {
+    listSnapshots().then(setList, () => setError("Die Versionen konnten nicht geladen werden."));
+  }, []);
+
+  const restore = async (m) => {
+    if (busyId) return;
+    const ok = window.confirm(
+      `Version „${m.label || "ohne Bezeichnung"}“ vom ${auditDate(m.at)} für alle wiederherstellen?\n\n` +
+      "Der jetzige Stand bleibt in der Git-Historie erhalten."
+    );
+    if (!ok) return;
+    setBusyId(m.id);
+    setError(null);
+    try { await restoreSnapshot(m); setDoneId(m.id); }
+    catch (e) { setError("Wiederherstellen fehlgeschlagen – keine Verbindung zu GitHub."); }
+    setBusyId(null);
+  };
+
+  return (
+    <Modal open onClose={onClose} width={680} title="Version laden"
+           subtitle="Gesicherte Versionen des gemeinsamen Stands, neueste zuerst. Wiederherstellen gilt für alle."
+           footer={<>
+             <Button variant="ghost" onClick={exportStore}>Als Datei exportieren</Button>
+             {st.canWrite && <Button variant="ghost" onClick={onImportFile}>Aus Datei importieren</Button>}
+             <Button variant="primary" onClick={onClose}>Schließen</Button>
+           </>}>
+      {error && <p className="text-sm mb-3" style={{ color: T.red }}>{error}</p>}
+      {!list && !error && <p className="text-sm" style={{ color: T.inkMuted }}>Versionen werden geladen …</p>}
+      {list && list.length === 0 && (
+        <p className="text-sm" style={{ color: T.inkMuted }}>Noch keine Version gesichert. „Sichern“ legt die erste an.</p>
+      )}
+      {list && list.length > 0 && (
+        <div>
+          {list.map((m, i) => (
+            <div key={m.id} className="flex items-center justify-between gap-4 py-2.5"
+                 style={{ borderTop: i ? `1px solid ${T.line}` : "none" }}>
+              <div>
+                <div className="text-sm font-medium" style={{ color: T.ink }}>{m.label || "Ohne Bezeichnung"}</div>
+                <div className="text-xs mt-0.5" style={{ color: T.inkMuted }}>{auditDate(m.at)} · {m.by}</div>
+              </div>
+              {doneId === m.id ? (
+                <span className="text-xs font-medium" style={{ color: T.green }}>Wiederhergestellt</span>
+              ) : st.canWrite && (
+                <Button size="sm" icon={Repeat} onClick={() => restore(m)}>
+                  {busyId === m.id ? "Wird wiederhergestellt …" : "Wiederherstellen"}
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {!st.canWrite && <p className="text-xs mt-4" style={{ color: T.inkSubtle }}>Wiederherstellen: {noWriteHint(st)}</p>}
+    </Modal>
+  );
+}
+
+/* -----------------------------------------------------------------------------
  * Speicherleiste in der Seitenleiste
  * Zeigt an, wann zuletzt gespeichert wurde, und bietet Sichern, Laden und
- * Zurücksetzen an. Der Browserspeicher hängt am Gerät — für Weitergabe oder
- * Ablage ist der Export der richtige Weg.
+ * Zurücksetzen an.
  * -------------------------------------------------------------------------- */
 function StorageBar({ onReset, onImportError }) {
   const [savedAt, setSavedAt] = useState(storeCache.savedAt || null);
   const [tick, setTick] = useState(0);
+  const [dialog, setDialog] = useState(null); // "save" | "load"
+  const shared = useRemoteState().enabled;
   const inputId = "mhp-store-import";
+  const pickFile = () => document.getElementById(inputId).click();
 
   /* Auf Speichervorgänge hören und die Anzeige minütlich auffrischen */
   useEffect(() => {
@@ -6875,11 +7091,12 @@ function StorageBar({ onReset, onImportError }) {
       )}
 
       <div className="flex flex-wrap gap-1.5">
-        <NavButton icon={ArrowUpRight} onClick={exportStore} title="Aktuellen Stand als JSON-Datei sichern">
+        <NavButton icon={ArrowUpRight} onClick={shared ? () => setDialog("save") : exportStore}
+                   title={shared ? "Aktuellen Stand als Version im Git sichern" : "Aktuellen Stand als JSON-Datei sichern"}>
           Sichern
         </NavButton>
-        <NavButton icon={FileText} onClick={() => document.getElementById(inputId).click()}
-                   title="Zuvor gesicherten Stand laden">
+        <NavButton icon={FileText} onClick={shared ? () => setDialog("load") : pickFile}
+                   title={shared ? "Gesicherte Version wiederherstellen" : "Zuvor gesicherten Stand laden"}>
           Laden
         </NavButton>
         <NavButton icon={Repeat} onClick={onReset} title="Auf den Auslieferungsstand zurücksetzen">
@@ -6896,6 +7113,9 @@ function StorageBar({ onReset, onImportError }) {
           e.target.value = "";
         }}
       />
+
+      {dialog === "save" && <SaveVersionModal onClose={() => setDialog(null)} />}
+      {dialog === "load" && <VersionsModal onClose={() => setDialog(null)} onImportFile={pickFile} />}
     </div>
   );
 }
@@ -9108,7 +9328,7 @@ function UseCaseIndustrializationDashboard() {
         </p>
         <p className="text-xs mt-3" style={{ color: T.inkSubtle }}>
           Wenn Sie den aktuellen Stand behalten möchten, brechen Sie ab und sichern Sie ihn
-          zuerst über „Sichern“ als Datei.
+          zuerst über „Sichern“.
         </p>
       </Modal>
 
