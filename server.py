@@ -8,7 +8,9 @@ Daten zu verändern.
 
   GET  /            Dashboard (index.html)
   GET  /api/state   { state, updatedAt }
-  PUT  /api/state   { state, baseUpdatedAt } → 200 { updatedAt } | 409
+  PUT  /api/state   { state, baseUpdatedAt, message } → 200 { updatedAt } | 409
+  GET  /api/history           [{ id, at, message }]   jede Speicherung
+  GET  /api/history/<id>      { id, at, message, state }
   GET  /api/snapshots         [{ id, at, by, label }]
   POST /api/snapshots         { id, at, by, label, state }
   GET  /api/snapshots/<id>    { id, at, by, label, state }
@@ -33,6 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 STATE_FILE = ROOT / ".dev-data" / "state.json"
 SNAPSHOT_DIR = ROOT / ".dev-data" / "snapshots"
+HISTORY_DIR = ROOT / ".dev-data" / "history"
 SNAPSHOT_ID = re.compile(r"^[0-9A-Za-z-]{1,64}$")
 HTML_FILE = ROOT / "index.html"
 PORT = int(os.environ.get("PORT", "8080"))
@@ -49,7 +52,7 @@ def read_state():
         return {"state": {}, "updatedAt": None}
 
 
-def write_state(new_state, base_updated_at):
+def write_state(new_state, base_updated_at, message=""):
     """Speichert atomar. Gibt den neuen updatedAt-Wert zurück, None bei Konflikt."""
     with _lock:
         if read_state().get("updatedAt") != base_updated_at:
@@ -60,18 +63,29 @@ def write_state(new_state, base_updated_at):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"state": new_state, "updatedAt": now}, f, ensure_ascii=False, indent=2)
         tmp.replace(STATE_FILE)
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        hid = re.sub(r"[^0-9A-Za-z]", "-", now)
+        (HISTORY_DIR / f"{hid}.json").write_text(
+            json.dumps({"id": hid, "at": now, "message": message, "state": new_state}, ensure_ascii=False),
+            encoding="utf-8")
         return now
 
 
-def list_snapshots():
-    if not SNAPSHOT_DIR.exists():
+def list_dir(directory, keys):
+    if not directory.exists():
         return []
     out = []
-    for f in SNAPSHOT_DIR.glob("*.json"):
-        with open(f, encoding="utf-8") as fh:
-            d = json.load(fh)
-        out.append({k: d.get(k) for k in ("id", "at", "by", "label")})
+    for f in directory.glob("*.json"):
+        d = json.loads(f.read_text(encoding="utf-8"))
+        out.append({k: d.get(k) for k in keys})
     return out
+
+
+def read_entry(directory, entry_id):
+    f = directory / f"{entry_id}.json"
+    if SNAPSHOT_ID.match(entry_id) and f.exists():
+        return json.loads(f.read_text(encoding="utf-8"))
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -96,14 +110,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/state":
             self._send_json(200, read_state())
         elif p == "/api/snapshots":
-            self._send_json(200, list_snapshots())
-        elif p.startswith("/api/snapshots/"):
-            sid = p.rsplit("/", 1)[1]
-            f = SNAPSHOT_DIR / f"{sid}.json"
-            if SNAPSHOT_ID.match(sid) and f.exists():
-                self._send_json(200, json.loads(f.read_text(encoding="utf-8")))
-            else:
+            self._send_json(200, list_dir(SNAPSHOT_DIR, ("id", "at", "by", "label")))
+        elif p == "/api/history":
+            self._send_json(200, list_dir(HISTORY_DIR, ("id", "at", "message")))
+        elif p.startswith(("/api/snapshots/", "/api/history/")):
+            directory = SNAPSHOT_DIR if p.startswith("/api/snapshots/") else HISTORY_DIR
+            entry = read_entry(directory, p.rsplit("/", 1)[1])
+            if entry is None:
                 self._send_json(404, {"error": "not found"})
+            else:
+                self._send_json(200, entry)
         elif p == "/.auth/me":
             user = os.environ.get("DEV_USER") or getpass.getuser()
             self._send_json(200, {"clientPrincipal": {"userDetails": user, "userRoles": ["authenticated"]}})
@@ -155,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
         if body is None:
             return
         state = body["state"]
-        updated_at = write_state(state, body.get("baseUpdatedAt"))
+        updated_at = write_state(state, body.get("baseUpdatedAt"), str(body.get("message", "")))
         if updated_at is None:
             self._send_json(409, {"error": "conflict"})
         else:

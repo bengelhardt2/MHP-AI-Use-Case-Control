@@ -38,14 +38,19 @@ Drei-Wege-Merge mit den eigenen Änderungen zusammen und speichert erneut – oh
 - Fremde Änderungen erscheinen nach spätestens 15 Sekunden (sofort beim Zurückwechseln in den Tab).
 - Ohne Verbindung bleiben Änderungen im Browser und werden nachgereicht.
 
-### Versionen (Sichern / Laden)
+### Sichern und Historie
 
-- **Sichern** (unten links) legt den aktuellen gemeinsamen Stand als Version an: `snapshots/<Zeitpunkt>.json`
-  auf dem Branch `data`, mit Person, Zeitpunkt und optionaler Bezeichnung. Vorher werden eigene und fremde
-  Änderungen abgeglichen, die Version enthält also den Stand aller.
-- **Laden** listet alle Versionen. „Wiederherstellen“ setzt den gemeinsamen Stand für alle auf diese Version –
-  als normaler Commit, der vorherige Stand bleibt in der Historie. Die anderen bekommen ihn automatisch.
-- Beides erfordert Anmeldung mit Schreibrecht. Export/Import als Datei gibt es weiterhin im Laden-Dialog.
+- **Sichern** (unten links, ein Klick) legt den aktuellen gemeinsamen Stand als Wiederherstellungspunkt an:
+  `snapshots/<Zeitpunkt>.json` auf dem Branch `data`, mit Person und Zeitpunkt. Vorher werden eigene und
+  fremde Änderungen abgeglichen – die Sicherung enthält den Stand aller.
+- **Historie** zeigt alle Änderungen aller Personen, neueste zuerst: automatische Speicherungen (pro Person
+  und Sitzung mit < 15 min Abstand zusammengefasst, mit betroffenen Bereichen), Sicherungen und
+  Wiederherstellungen. Filter „Nur Sicherungen“.
+- **Wiederherstellen** geht für jeden Eintrag – auch automatische Speicherungen. Es gilt für alle und ist selbst
+  ein Commit; der Stand davor bleibt in der Historie und lässt sich genauso zurückholen.
+- Quelle der Historie sind die Commits auf `data` (`data/state.json` und `snapshots/`).
+- Sichern und Wiederherstellen erfordern Anmeldung mit Schreibrecht. Export/Import als Datei gibt es im
+  Historie-Fenster.
 
 ### Statusanzeige (oben rechts)
 
@@ -77,7 +82,7 @@ Wer hat was geändert:
 git fetch origin data && git log --format='%ad  %s' --date=format:'%Y-%m-%d %H:%M' origin/data -- data/state.json
 ```
 
-Stand wiederherstellen: im Dashboard über „Laden“ eine Version wählen. Notfalls eine ältere Fassung von
+Stand wiederherstellen: im Dashboard über „Historie“ einen Eintrag wählen. Notfalls eine ältere Fassung von
 `data/state.json` aus der Historie des Branches `data` zurückspielen.
 
 > Das Repo ist öffentlich. Keine personenbezogenen oder vertraulichen Daten eintragen.

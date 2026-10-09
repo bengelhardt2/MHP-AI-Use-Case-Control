@@ -1668,6 +1668,27 @@ const apiError = async (res) => {
   return `GitHub ${res.status}${d.message ? `: ${d.message}` : ""}`;
 };
 
+/* Einträge der Historie aus Commit-Nachrichten:
+ *   "<Name>: useCases, deployments"            automatische Speicherung
+ *   "<Name>: Wiederherstellung – <Bezug>"       Wiederherstellung
+ *   "<Name>: Sicherung – …\n\n{json}"           Sicherung (Metadaten in der letzten Zeile) */
+const HISTORY_PAGE = 100;
+const parseSnapshot = (message) => {
+  try {
+    const m = JSON.parse(message.trim().split("\n").pop());
+    return m && m.id ? { kind: "snapshot", id: m.id, at: m.at, by: m.by, label: m.label || "" } : null;
+  } catch (e) { return null; }
+};
+const parseChange = (message, id, at, fallbackBy = "–") => {
+  const m = message.split("\n")[0].match(/^(.+?): (.+)$/);
+  if (m && m[2].startsWith("Wiederherstellung")) {
+    return { kind: "restore", id, at, by: m[1], label: m[2].replace(/^Wiederherstellung – /, "") };
+  }
+  const keys = m && /^[\w.]+(, [\w.]+)*$/.test(m[2]) ? m[2].split(", ") : [];
+  if (keys.some((k) => k === "savedAt" || areaLabel(k))) return { kind: "change", id, at, by: m[1], keys };
+  return { kind: "change", id, at, by: fallbackBy, keys: [] };
+};
+
 const githubBackend = {
   kind: "github",
   token: () => lsGet(TOKEN_KEY) || "",
@@ -1685,8 +1706,8 @@ const githubBackend = {
     const perms = repo.ok ? (await repo.json()).permissions || {} : {};
     return { id: u.login, name: u.name || u.login, canWrite: !!perms.push };
   },
-  async readJson(path) {
-    const res = await fetch(`${GH_API}/contents/${path}?ref=${GH.branch}`, { headers: this.headers(), cache: "no-store" });
+  async readJson(path, ref = GH.branch) {
+    const res = await fetch(`${GH_API}/contents/${path}?ref=${ref}`, { headers: this.headers(), cache: "no-store" });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`read ${res.status}`);
     const d = await res.json();
@@ -1718,26 +1739,36 @@ const githubBackend = {
     if (res.status === 409 || res.status === 422) return { conflict: true };
     return { error: res.status, detail: await apiError(res) };
   },
-  /* Versionen liegen als snapshots/<id>.json auf dem data-Branch. Die Liste kommt
-   * aus den Commits – deren Nachricht trägt die Metadaten als letzte Zeile (JSON). */
+  /* Historie = Commits auf dem data-Branch: automatische Speicherungen ändern
+   * data/state.json, Sicherungen legen snapshots/<id>.json an. */
   async saveSnapshot(snap) {
     const meta = { id: snap.id, at: snap.at, by: snap.by, label: snap.label };
     const message = `${snap.by}: Sicherung – ${snap.label || "ohne Bezeichnung"}\n\n${JSON.stringify(meta)}`;
     const res = await this.writeJson(`${GH.snapshots}/${snap.id}.json`, snap, message);
     if (!res.ok) throw new Error(await apiError(res));
   },
-  async listSnapshots() {
-    const res = await fetch(`${GH_API}/commits?sha=${GH.branch}&path=${GH.snapshots}&per_page=100`,
-                            { headers: this.headers(), cache: "no-store" });
-    if (!res.ok) throw new Error(await apiError(res));
-    return (await res.json()).map((c) => {
-      try { return JSON.parse(c.commit.message.trim().split("\n").pop()); } catch (e) { return null; }
-    }).filter((m) => m && m.id);
+  async listHistory(page) {
+    const commits = async (path) => {
+      const res = await fetch(`${GH_API}/commits?sha=${GH.branch}&path=${path}&per_page=${HISTORY_PAGE}&page=${page}`,
+                              { headers: this.headers(), cache: "no-store" });
+      if (!res.ok) throw new Error(await apiError(res));
+      return res.json();
+    };
+    const [changes, snaps] = await Promise.all([commits(GH.file), commits(GH.snapshots)]);
+    return {
+      entries: [
+        ...changes.map((c) => parseChange(c.commit.message, c.sha, c.commit.author.date, c.commit.author.name)),
+        ...snaps.map((c) => parseSnapshot(c.commit.message)).filter(Boolean),
+      ],
+      more: changes.length === HISTORY_PAGE || snaps.length === HISTORY_PAGE,
+    };
   },
-  async loadSnapshot(id) {
-    const r = await this.readJson(`${GH.snapshots}/${id}.json`);
-    if (!r) throw new Error("not found");
-    return r.doc;
+  async loadVersion(entry) {
+    const r = entry.kind === "snapshot"
+      ? await this.readJson(`${GH.snapshots}/${entry.id}.json`)
+      : await this.readJson(GH.file, entry.id);
+    if (!r) throw new Error("Version nicht gefunden");
+    return r.doc.state || {};
   },
 };
 
@@ -1755,11 +1786,11 @@ const serverBackend = {
     const d = await res.json();
     return { state: d.state || {}, version: d.updatedAt || null };
   },
-  async save(state, version) {
+  async save(state, version, meta) {
     const res = await fetch("/api/state", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state, baseUpdatedAt: version }),
+      body: JSON.stringify({ state, baseUpdatedAt: version, message: meta.message }),
     });
     if (res.ok) return { ok: true, version: (await res.json()).updatedAt };
     if (res.status === 409) return { conflict: true };
@@ -1771,15 +1802,27 @@ const serverBackend = {
     });
     if (!res.ok) throw new Error(`snapshot ${res.status}`);
   },
-  async listSnapshots() {
-    const res = await fetch("/api/snapshots", { cache: "no-store" });
-    if (!res.ok) throw new Error(`list ${res.status}`);
-    return res.json();
+  async listHistory(page) {
+    if (page > 1) return { entries: [], more: false };
+    const get = async (url) => {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Fehler ${res.status}`);
+      return res.json();
+    };
+    const [changes, snaps] = await Promise.all([get("/api/history"), get("/api/snapshots")]);
+    return {
+      entries: [
+        ...changes.map((c) => parseChange(c.message || "", c.id, c.at)),
+        ...snaps.map((m) => ({ kind: "snapshot", id: m.id, at: m.at, by: m.by, label: m.label || "" })),
+      ],
+      more: false,
+    };
   },
-  async loadSnapshot(id) {
-    const res = await fetch(`/api/snapshots/${encodeURIComponent(id)}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`load ${res.status}`);
-    return res.json();
+  async loadVersion(entry) {
+    const base = entry.kind === "snapshot" ? "/api/snapshots/" : "/api/history/";
+    const res = await fetch(base + encodeURIComponent(entry.id), { cache: "no-store" });
+    if (!res.ok) throw new Error(`Fehler ${res.status}`);
+    return (await res.json()).state || {};
   },
 };
 
@@ -1998,7 +2041,7 @@ async function poll() {
   });
 }
 
-/* --- Versionen (Sichern / Laden) ------------------------------------------- */
+/* --- Sichern und Historie ------------------------------------------------- */
 let pushMessage = null; // abweichende Commit-Nachricht für die nächste Speicherung
 
 const whenIdle = async () => { while (busy) await new Promise((r) => setTimeout(r, 100)); };
@@ -2007,10 +2050,11 @@ const syncFailed = () => ["offline", "readonly", "forbidden", "unauthorized"].in
 /* Konto ist Collaborator, aber der Token darf nicht schreiben (z. B. fine-grained ohne Contents: write) */
 const isTokenScopeError = (msg) => /^GitHub 40[34]/.test(msg || "");
 const failure = () => new Error(remote.lastError || "Keine Verbindung zu GitHub");
+const errorText = (e) => (e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message);
 
-/* Sichert den aktuellen gemeinsamen Stand inkl. eigener, noch nicht übertragener
- * Änderungen und der neuesten Änderungen der anderen. */
-async function createSnapshot(label) {
+/* Sichert den gemeinsamen Stand inkl. eigener, noch nicht übertragener und der
+ * neuesten fremden Änderungen als benannten Wiederherstellungspunkt. */
+async function createSnapshot(label = "") {
   await whenIdle();
   clearTimeout(pushTimer);
   await exclusive(async () => { await pull(); await push(); });
@@ -2024,20 +2068,54 @@ async function createSnapshot(label) {
   }
 }
 
-const listSnapshots = async () =>
-  (await backend.listSnapshots()).sort((a, b) => (a.at < b.at ? 1 : -1));
+const AREA_LABELS = {
+  useCases: "Use Cases", deployments: "Deployments", sources: "Quellen",
+  retirementLog: "Retirement Log", stages: "Lifecycle", raci: "RACI",
+};
+const areaLabel = (k) => AREA_LABELS[k]
+  || (k.startsWith("ai.") ? "AI Transformation" : k.startsWith("academy.") ? "AI Academy"
+    : k.startsWith("glossary.") ? "Glossar" : null);
+const areasOf = (e) => [...new Set((e.keys || []).map(areaLabel).filter(Boolean))];
 
-/* Setzt den gemeinsamen Stand für alle auf eine Version zurück. Das ist ein
- * normaler Commit – der vorherige Stand bleibt in der Historie erhalten. */
-async function restoreSnapshot(meta) {
-  const snap = await backend.loadSnapshot(meta.id);
+/* Automatisch wird bei jeder Eingabe gespeichert. Damit die Historie lesbar
+ * bleibt, ergeben aufeinanderfolgende Speicherungen derselben Person mit
+ * weniger als 15 Minuten Abstand einen Eintrag – wiederhergestellt wird dessen Endstand. */
+const SESSION_GAP_MS = 15 * 60000;
+function buildTimeline(entries) {
+  const unique = [...new Map(entries.map((e) => [`${e.kind}:${e.id}`, e])).values()];
+  unique.sort((a, b) => (a.at < b.at ? 1 : -1));
+  const out = [];
+  for (const e of unique) {
+    const prev = out[out.length - 1];
+    if (e.kind === "change" && prev && prev.kind === "change" && prev.by === e.by
+        && new Date(prev.startAt) - new Date(e.at) < SESSION_GAP_MS) {
+      prev.count += 1;
+      prev.startAt = e.at;
+      prev.areas = [...new Set([...prev.areas, ...areasOf(e)])];
+      continue;
+    }
+    out.push(e.kind === "change" ? { ...e, count: 1, startAt: e.at, areas: areasOf(e) } : e);
+  }
+  return out;
+}
+
+const fetchHistory = (page) => backend.listHistory(page);
+
+/* Setzt den gemeinsamen Stand für alle auf einen früheren Stand. Das ist selbst
+ * ein Commit – der Stand davor bleibt in der Historie und ist wiederherstellbar. */
+async function restoreVersion(entry) {
+  const state = await backend.loadVersion(entry);
   await whenIdle();
   clearTimeout(pushTimer);
+  const what = entry.kind === "snapshot"
+    ? `Sicherung${entry.label ? ` „${entry.label}“` : ""} vom ${auditDate(entry.at)}`
+    : `Stand von ${entry.by} vom ${auditDate(entry.at)}`;
   await exclusive(async () => {
     await pull();
-    applyShared(snap.state || {});
-    pushMessage = `${currentUser()}: Wiederherstellung – ${snap.label || auditDate(snap.at)}`;
+    applyShared(state);
+    pushMessage = `${currentUser()}: Wiederherstellung – ${what}`;
     await push();
+    pushMessage = null; // nichts zu speichern (Stand war identisch) → nicht an die nächste Änderung hängen
   });
   if (syncFailed()) throw failure();
 }
@@ -6921,9 +6999,10 @@ function AiTransformationView({ sub }) {
 }
 
 /* -----------------------------------------------------------------------------
- * Versionen sichern und laden
- * Mit gemeinsamem Stand landen Versionen im Git (snapshots/ auf dem data-Branch)
- * und stehen allen zur Verfügung. Ohne Verbindung bleibt der Export als Datei.
+ * Sichern und Historie
+ * Mit gemeinsamem Stand: „Sichern“ legt mit einem Klick einen Wiederherstellungs-
+ * punkt im Git an, „Historie“ zeigt alle Änderungen aller Personen und stellt
+ * jeden früheren Stand für alle wieder her. Ohne Verbindung: Export als Datei.
  * -------------------------------------------------------------------------- */
 function useRemoteState() {
   const [st, setSt] = useState({ ...remote });
@@ -6938,123 +7017,138 @@ function useRemoteState() {
 const TOKEN_HELP = "Dein Token darf nicht schreiben. Erstelle unter github.com/settings/tokens einen Token (classic) " +
   "mit Scope „repo“ und trage ihn über „Anmelden“ ein.";
 
-const noWriteHint = (st) => st.status === "forbidden" ? TOKEN_HELP : st.user
-  ? "Dein Konto hat kein Schreibrecht. Einladung zum GitHub-Repo angenommen? Sonst beim Admin melden."
+const noWriteHint = (st) =>
+  st.status === "forbidden" ? TOKEN_HELP
+  : st.status === "unauthorized" ? "Dein Token ist abgelaufen oder wurde widerrufen. Bitte über „Anmelden“ einen neuen eintragen."
+  : st.user ? "Dein Konto hat kein Schreibrecht. Einladung zum GitHub-Repo angenommen? Sonst beim Admin melden."
   : "Dafür musst du angemeldet sein.";
 
-function SaveVersionModal({ onClose }) {
-  const st = useRemoteState();
-  const [label, setLabel] = useState("");
-  const [phase, setPhase] = useState("idle"); // idle | busy | done | error
-  const [reason, setReason] = useState("");
-  const run = async () => {
-    if (phase === "busy") return;
-    setPhase("busy");
-    try { await createSnapshot(label); setPhase("done"); }
-    catch (e) { setReason(e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message); setPhase("error"); }
-  };
-  const tokenIssue = isTokenScopeError(reason) || st.status === "forbidden";
-  const canSignIn = st.kind === "github" && (!st.user || tokenIssue);
+const canReplaceToken = (st) =>
+  st.kind === "github" && (!st.user || st.status === "forbidden" || st.status === "unauthorized");
 
+function NoWriteModal({ onClose }) {
+  const st = useRemoteState();
   return (
-    <Modal open onClose={onClose} width={520} title="Version sichern"
-           subtitle="Legt den aktuellen gemeinsamen Stand als Version im Git ab. Alle können sie über „Laden“ wiederherstellen."
-           footer={phase === "done"
-             ? <Button variant="primary" onClick={onClose}>Fertig</Button>
-             : !st.canWrite || tokenIssue
-               ? <>
-                   <Button onClick={onClose}>Schließen</Button>
-                   {canSignIn && <Button variant="primary" onClick={signIn}>Anmelden</Button>}
-                 </>
-               : <>
-                   <Button onClick={onClose}>Abbrechen</Button>
-                   <Button variant="primary" icon={ArrowUpRight} onClick={run}>{phase === "busy" ? "Sichert …" : "Sichern"}</Button>
-                 </>}>
-      {tokenIssue ? (
-        <>
-          <p className="text-sm" style={{ color: T.ink }}>{TOKEN_HELP}</p>
-          {reason && <p className="text-xs mt-3" style={{ color: T.inkSubtle }}>{reason}</p>}
-        </>
-      ) : !st.canWrite ? (
-        <p className="text-sm" style={{ color: T.ink }}>{noWriteHint(st)}</p>
-      ) : phase === "done" ? (
-        <p className="text-sm" style={{ color: T.ink }}>
-          <CheckCircle2 size={14} style={{ color: T.green, display: "inline", marginRight: 6, verticalAlign: "-2px" }} />
-          Version gesichert{label.trim() ? ` – „${label.trim()}“` : ""}.
-        </p>
-      ) : (
-        <>
-          <Input label="Bezeichnung (optional)" value={label} onChange={setLabel}
-                 placeholder="z. B. Stand vor dem Steering Committee" />
-          {phase === "error" && (
-            <p className="text-xs mt-3" style={{ color: T.red }}>
-              Sichern fehlgeschlagen – {reason}
-            </p>
-          )}
-        </>
+    <Modal open onClose={onClose} width={480} title="Nicht möglich"
+           footer={<>
+             <Button onClick={onClose}>Schließen</Button>
+             {canReplaceToken(st) && <Button variant="primary" onClick={signIn}>Anmelden</Button>}
+           </>}>
+      <p className="text-sm" style={{ color: T.ink }}>{noWriteHint(st)}</p>
+      {st.lastError && st.status === "forbidden" && (
+        <p className="text-xs mt-3" style={{ color: T.inkSubtle }}>{st.lastError}</p>
       )}
     </Modal>
   );
 }
 
-function VersionsModal({ onClose, onImportFile }) {
+const auditTime = (iso) => new Date(iso).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+
+function HistoryModal({ onClose, onImportFile }) {
   const st = useRemoteState();
-  const [list, setList] = useState(null);
+  const [entries, setEntries] = useState(null);
+  const [page, setPage] = useState(1);
+  const [more, setMore] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [onlySnapshots, setOnlySnapshots] = useState(false);
   const [busyId, setBusyId] = useState(null);
-  const [doneId, setDoneId] = useState(null);
 
-  useEffect(() => {
-    listSnapshots().then(setList, (e) => setError(`Die Versionen konnten nicht geladen werden – ${e.message}`));
-  }, []);
+  const load = async (p) => {
+    setLoading(true);
+    try {
+      const r = await fetchHistory(p);
+      setEntries((prev) => [...(p === 1 ? [] : prev || []), ...r.entries]);
+      setMore(r.more);
+      setPage(p);
+    } catch (e) {
+      setError(`Die Historie konnte nicht geladen werden – ${errorText(e)}`);
+    }
+    setLoading(false);
+  };
+  useEffect(() => { load(1); }, []);
 
-  const restore = async (m) => {
+  const timeline = useMemo(() => buildTimeline(entries || []), [entries]);
+  const currentId = (timeline.find((e) => e.kind !== "snapshot") || {}).id;
+  const shown = onlySnapshots ? timeline.filter((e) => e.kind === "snapshot") : timeline;
+
+  const restore = async (e) => {
     if (busyId) return;
     const ok = window.confirm(
-      `Version „${m.label || "ohne Bezeichnung"}“ vom ${auditDate(m.at)} für alle wiederherstellen?\n\n` +
-      "Der jetzige Stand bleibt in der Git-Historie erhalten."
+      `Stand vom ${auditDate(e.at)} (${e.by}) für alle wiederherstellen?\n\n` +
+      "Der jetzige Stand bleibt in der Historie erhalten und kann jederzeit zurückgeholt werden."
     );
     if (!ok) return;
-    setBusyId(m.id);
+    setBusyId(e.id);
     setError(null);
-    try { await restoreSnapshot(m); setDoneId(m.id); }
-    catch (e) { setError(`Wiederherstellen fehlgeschlagen – ${e instanceof TypeError ? `Netzwerk: ${e.message}` : e.message}`); }
+    try { await restoreVersion(e); await load(1); }
+    catch (err) { setError(`Wiederherstellen fehlgeschlagen – ${errorText(err)}`); }
     setBusyId(null);
   };
 
+  const title = (e) =>
+    e.kind === "snapshot" ? (e.label ? `Sicherung „${e.label}“` : "Sicherung")
+    : e.kind === "restore" ? `Wiederhergestellt: ${e.label}`
+    : e.areas.length ? e.areas.join(", ") : "Änderung";
+  const when = (e) => e.kind === "change" && e.count > 1
+    ? `${auditDate(e.startAt)} – ${auditTime(e.at)} · ${e.count} Speicherungen`
+    : auditDate(e.at);
+
   return (
-    <Modal open onClose={onClose} width={680} title="Version laden"
-           subtitle="Gesicherte Versionen des gemeinsamen Stands, neueste zuerst. Wiederherstellen gilt für alle."
+    <Modal open onClose={onClose} width={720} title="Änderungshistorie"
+           subtitle="Alle Speicherungen des gemeinsamen Stands, neueste zuerst. Wiederherstellen gilt für alle."
            footer={<>
              <Button variant="ghost" onClick={exportStore}>Als Datei exportieren</Button>
              {st.canWrite && <Button variant="ghost" onClick={onImportFile}>Aus Datei importieren</Button>}
              <Button variant="primary" onClick={onClose}>Schließen</Button>
            </>}>
+      <div className="flex items-center gap-2 mb-3">
+        <Button size="sm" variant={onlySnapshots ? "default" : "primary"} onClick={() => setOnlySnapshots(false)}>
+          Alle Änderungen
+        </Button>
+        <Button size="sm" variant={onlySnapshots ? "primary" : "default"} onClick={() => setOnlySnapshots(true)}>
+          Nur Sicherungen
+        </Button>
+      </div>
+
       {error && <p className="text-sm mb-3" style={{ color: T.red }}>{error}</p>}
-      {!list && !error && <p className="text-sm" style={{ color: T.inkMuted }}>Versionen werden geladen …</p>}
-      {list && list.length === 0 && (
-        <p className="text-sm" style={{ color: T.inkMuted }}>Noch keine Version gesichert. „Sichern“ legt die erste an.</p>
+      {!entries && loading && <p className="text-sm" style={{ color: T.inkMuted }}>Historie wird geladen …</p>}
+      {entries && shown.length === 0 && (
+        <p className="text-sm" style={{ color: T.inkMuted }}>
+          {onlySnapshots ? "Noch keine Sicherung. „Sichern“ legt die erste an." : "Noch keine Änderungen gespeichert."}
+        </p>
       )}
-      {list && list.length > 0 && (
-        <div>
-          {list.map((m, i) => (
-            <div key={m.id} className="flex items-center justify-between gap-4 py-2.5"
-                 style={{ borderTop: i ? `1px solid ${T.line}` : "none" }}>
-              <div>
-                <div className="text-sm font-medium" style={{ color: T.ink }}>{m.label || "Ohne Bezeichnung"}</div>
-                <div className="text-xs mt-0.5" style={{ color: T.inkMuted }}>{auditDate(m.at)} · {m.by}</div>
+
+      <div style={{ maxHeight: "55vh", overflowY: "auto" }}>
+        {shown.map((e, i) => (
+          <div key={`${e.kind}:${e.id}`} className="flex items-center justify-between gap-4 py-2.5"
+               style={{ borderTop: i ? `1px solid ${T.line}` : "none" }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="flex items-center gap-2">
+                {e.kind === "snapshot" && <Badge label="Sicherung" color={T.green} soft={T.greenSoft} line={T.greenLine} />}
+                {e.kind === "restore" && <Badge label="Wiederherstellung" color={T.amber} soft={T.amberSoft} line={T.amberLine} />}
+                <span className="text-sm font-medium" style={{ color: T.ink }}>{title(e)}</span>
               </div>
-              {doneId === m.id ? (
-                <span className="text-xs font-medium" style={{ color: T.green }}>Wiederhergestellt</span>
-              ) : st.canWrite && (
-                <Button size="sm" icon={Repeat} onClick={() => restore(m)}>
-                  {busyId === m.id ? "Wird wiederhergestellt …" : "Wiederherstellen"}
-                </Button>
-              )}
+              <div className="text-xs mt-0.5" style={{ color: T.inkMuted }}>{e.by} · {when(e)}</div>
             </div>
-          ))}
-        </div>
-      )}
+            {e.id === currentId ? (
+              <span className="text-xs font-medium" style={{ color: T.inkSubtle, whiteSpace: "nowrap" }}>Aktueller Stand</span>
+            ) : st.canWrite && (
+              <Button size="sm" icon={Repeat} onClick={() => restore(e)}>
+                {busyId === e.id ? "Wird wiederhergestellt …" : "Wiederherstellen"}
+              </Button>
+            )}
+          </div>
+        ))}
+        {more && (
+          <div className="pt-3">
+            <Button size="sm" variant="ghost" onClick={() => !loading && load(page + 1)}>
+              {loading ? "Lädt …" : "Ältere Einträge laden"}
+            </Button>
+          </div>
+        )}
+      </div>
+
       {!st.canWrite && <p className="text-xs mt-4" style={{ color: T.inkSubtle }}>Wiederherstellen: {noWriteHint(st)}</p>}
     </Modal>
   );
@@ -7062,14 +7156,16 @@ function VersionsModal({ onClose, onImportFile }) {
 
 /* -----------------------------------------------------------------------------
  * Speicherleiste in der Seitenleiste
- * Zeigt an, wann zuletzt gespeichert wurde, und bietet Sichern, Laden und
+ * Zeigt an, wann zuletzt gespeichert wurde, und bietet Sichern, Historie und
  * Zurücksetzen an.
  * -------------------------------------------------------------------------- */
 function StorageBar({ onReset, onImportError }) {
   const [savedAt, setSavedAt] = useState(storeCache.savedAt || null);
   const [tick, setTick] = useState(0);
-  const [dialog, setDialog] = useState(null); // "save" | "load"
-  const shared = useRemoteState().enabled;
+  const [dialog, setDialog] = useState(null); // "history" | "denied"
+  const [save, setSave] = useState(null);     // null | "busy" | "done" | { error }
+  const rs = useRemoteState();
+  const shared = rs.enabled;
   const inputId = "mhp-store-import";
   const pickFile = () => document.getElementById(inputId).click();
 
@@ -7084,6 +7180,20 @@ function StorageBar({ onReset, onImportError }) {
       clearInterval(t);
     };
   }, []);
+
+  const doSave = async () => {
+    if (!shared) { exportStore(); return; }
+    if (!rs.canWrite) { setDialog("denied"); return; }
+    if (save === "busy") return;
+    setSave("busy");
+    try {
+      await createSnapshot();
+      setSave("done");
+      setTimeout(() => setSave((x) => (x === "done" ? null : x)), 4000);
+    } catch (e) {
+      setSave({ error: errorText(e) });
+    }
+  };
 
   const NavButton = ({ children, onClick, icon: Icon, title }) => (
     <button onClick={onClick} title={title}
@@ -7119,18 +7229,30 @@ function StorageBar({ onReset, onImportError }) {
       )}
 
       <div className="flex flex-wrap gap-1.5">
-        <NavButton icon={ArrowUpRight} onClick={shared ? () => setDialog("save") : exportStore}
-                   title={shared ? "Aktuellen Stand als Version im Git sichern" : "Aktuellen Stand als JSON-Datei sichern"}>
-          Sichern
+        <NavButton icon={ArrowUpRight} onClick={doSave}
+                   title={shared ? "Aktuellen Stand als Wiederherstellungspunkt im Git sichern" : "Aktuellen Stand als JSON-Datei sichern"}>
+          {save === "busy" ? "Sichert …" : "Sichern"}
         </NavButton>
-        <NavButton icon={FileText} onClick={shared ? () => setDialog("load") : pickFile}
-                   title={shared ? "Gesicherte Version wiederherstellen" : "Zuvor gesicherten Stand laden"}>
-          Laden
+        <NavButton icon={shared ? Clock : FileText} onClick={shared ? () => setDialog("history") : pickFile}
+                   title={shared ? "Änderungshistorie ansehen und frühere Stände wiederherstellen" : "Zuvor gesicherten Stand laden"}>
+          {shared ? "Historie" : "Laden"}
         </NavButton>
         <NavButton icon={Repeat} onClick={onReset} title="Auf den Auslieferungsstand zurücksetzen">
           Zurücksetzen
         </NavButton>
       </div>
+
+      {save === "done" && (
+        <p className="flex items-center gap-1.5" style={{ color: T.green, marginTop: 6 }}>
+          <CheckCircle2 size={11} /> Version gesichert
+        </p>
+      )}
+      {save && save.error && (
+        <p style={{ color: T.amber, marginTop: 6, lineHeight: 1.4 }}>
+          Sichern fehlgeschlagen – {save.error}
+          {canReplaceToken(rs) && <> · <button onClick={signIn} style={{ textDecoration: "underline" }}>Anmelden</button></>}
+        </p>
+      )}
 
       <input
         id={inputId} type="file" accept="application/json,.json"
@@ -7142,8 +7264,8 @@ function StorageBar({ onReset, onImportError }) {
         }}
       />
 
-      {dialog === "save" && <SaveVersionModal onClose={() => setDialog(null)} />}
-      {dialog === "load" && <VersionsModal onClose={() => setDialog(null)} onImportFile={pickFile} />}
+      {dialog === "history" && <HistoryModal onClose={() => setDialog(null)} onImportFile={pickFile} />}
+      {dialog === "denied" && <NoWriteModal onClose={() => setDialog(null)} />}
     </div>
   );
 }
