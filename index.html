@@ -2479,7 +2479,7 @@ function DataTable({ columns, rows, onRowClick, sortKey, sortDir, onSort, empty 
           )}
           {rows.map((r, i) => (
             <tr
-              key={r.id || i}
+              key={r.key ?? r.id ?? i}
               onClick={() => onRowClick && onRowClick(r)}
               style={{ borderBottom: `1px solid ${T.lineSoft}`, cursor: onRowClick ? "pointer" : "default" }}
               onMouseEnter={(e) => (e.currentTarget.style.background = T.surfaceAlt)}
@@ -3064,9 +3064,13 @@ function RaciMatrix({ raci, stages, onToggle }) {
 /* -----------------------------------------------------------------------------
  * 6.3 USE CASE PORTFOLIO (Tabelle mit Sortierung, Edit, Add, Delete)
  * -------------------------------------------------------------------------- */
+const LOG_OPEN_KEY = `${STORE_KEY}.ui.retirementLogOpen`;
+
 function PortfolioView({ useCases, deployments, onOpen, onEdit, onDelete, onAdd, retirementLog = [] }) {
   const [sortKey, setSortKey] = useState("id");
   const [sortDir, setSortDir] = useState("asc");
+  const [logOpen, setLogOpen] = useState(() => lsGet(LOG_OPEN_KEY) === "1"); // Ansichtswahl je Browser, nicht geteilt
+  const toggleLog = () => setLogOpen((o) => { lsSet(LOG_OPEN_KEY, o ? "0" : "1"); return !o; });
 
   const deployCount = useCallback((id) => deployments.filter((d) => d.useCaseId === id).length, [deployments]);
 
@@ -3152,8 +3156,14 @@ function PortfolioView({ useCases, deployments, onOpen, onEdit, onDelete, onAdd,
           title={`Retirement Log · ${retirementLog.length} eingestellt`}
           subtitle="Gelöschte Use Cases mit dokumentierter Begründung."
           padded={false}
+          right={
+            <Button size="sm" variant="ghost" onClick={toggleLog}>
+              <ChevronDown size={13} style={{ transform: logOpen ? "rotate(180deg)" : "none", transition: "transform 150ms" }} />
+              {logOpen ? "Einklappen" : "Anzeigen"}
+            </Button>
+          }
         >
-          <DataTable
+          {logOpen && <DataTable
             columns={[
               { key: "date", label: "Datum" },
               { key: "id", label: "ID", render: (r) => <span style={{ fontFamily: mono, color: T.inkMuted }}>{r.id}</span> },
@@ -3168,8 +3178,8 @@ function PortfolioView({ useCases, deployments, onOpen, onEdit, onDelete, onAdd,
                   <span style={{ color: T.inkMuted }}>{r.deployments} Deployments · {r.sources} Quellen</span>) },
               { key: "createdBy", label: "Eingestellt von", render: (r) => r.createdBy || "–" },
             ]}
-            rows={retirementLog.map((r, i) => ({ ...r, id: r.id, key: i }))}
-          />
+            rows={retirementLog.map((r, i) => ({ ...r, key: `${i}:${r.id}:${r.date}` }))}
+          />}
         </Card>
       )}
     </div>
