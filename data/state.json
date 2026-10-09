@@ -166,7 +166,7 @@
       {
         "id": "UC-005",
         "name": "Portfolio Graph",
-        "shortDescription": "Der Portfolio Graph erfasst das Portfolio organisationsübergreifend in einer einheitlichen Struktur und macht es interaktiv zugänglich. Jedes Element ist mit seinem fachlichen Verständnis, den beteiligten Rollen, bewährten Vorgehensweisen und seinem Umsetzungsstand beschrieben; daraus entsteht ein Netz, das Abhängigkeiten zwischen den Elementen und Anknüpfungspunkte für Wiederverwendung sichtbar macht. Erschlossen wird es über drei Zoomstufen, von der Gesamtsicht über das Abhängigkeitsnetz bis in das einzelne Element. Das Portfolio wird im laufenden Gebrauch weiterentwickelt, nicht zu Stichtagen.",
+        "shortDescription": "Der Portfolio Graph erfasst das Portfolio organisationsübergreifend in einer einheitlichen Struktur und macht es über drei Zoomstufen interaktiv zugänglich. Das daraus entstehende Netz zeigt Abhängigkeiten und Anknüpfungspunkte für Wiederverwendung und hält das Portfolio im laufenden Gebrauch weiterentwickelbar.",
         "businessProblem": "Das Portfolio ist über die Organisation verteilt, aber nirgends zusammenhängend erfasst — in unterschiedlichen Formaten, Ständen und Detailtiefen. Damit fehlt die entscheidende Information: welche Elemente voneinander abhängen, in welcher Reihenfolge sie deshalb angegangen werden sollten und wo Themen sich berühren. Wiederverwendungschancen und Mehrfachaufwände fallen so erst auf, wenn die Vorhaben bereits laufen. Und ohne Vorwissen ist nicht erkennbar, welche Elemente für die eigene Rolle relevant sind, weshalb Abstimmungen beim Erklären beginnen statt bei der Entscheidung.",
         "solution": "Der Portfolio Graph führt das Portfolio in einem Modell zusammen: je Element das fachliche Verständnis, bewährte Vorgehensweisen, beteiligte Rollen, der Reifegrad sowie Vorgänger, Nachfolger und begründete Querverweise auf verwandte Elemente. Aus diesen Beziehungen wird das Netz abgeleitet — wer ein Element auswählt, sieht unmittelbar, was ihm vorausgehen muss und was darauf aufbaut. Die Querverweise bilden die Anknüpfungspunkte ab und tragen jeweils eine Begründung, sodass Wiederverwendung als nachvollziehbarer Hinweis erscheint und nicht als Behauptung. Für die Weiterentwicklung lässt sich der Umsetzungsstand je Element pflegen und als Fortschrittssicht über das gesamte Portfolio einblenden.",
         "businessValue": "Das Portfolio wird als Ganzes steuerbar statt in Einzelsichten. Die erfassten Beziehungen machen die sinnvolle Reihenfolge von Vorhaben diskutierbar und vermeiden Investitionen in verfrühte Bausteine; die Anknüpfungspunkte machen Mehrfachaufwände und Wiederverwendungschancen früh erkennbar. Über die hinterlegten Rollen findet jede Zielgruppe die für sie relevanten Elemente selbst, was Abstimmungen verkürzt. Und weil das Portfolio im Arbeiten gepflegt wird, bleibt es aktuell, statt zwischen zwei Erhebungen zu veralten.",
@@ -244,10 +244,12 @@
           "incidentManagement": "—",
           "lastRelease": "—",
           "lastBackupTest": "—"
-        }
+        },
+        "updatedBy": "felix-nussbaum",
+        "updatedAt": "2026-10-09T08:04:13.088Z"
       }
     ]
   },
-  "updatedAt": "2026-10-09T08:02:21.988Z",
+  "updatedAt": "2026-10-09T08:04:14.292Z",
   "updatedBy": "felix-nussbaum"
 }
