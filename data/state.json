@@ -101,93 +101,6 @@
           "lastRelease": "",
           "lastBackupTest": ""
         }
-      },
-      {
-        "createdBy": "bengelhardt2",
-        "createdAt": "2026-10-09T06:57:36.738Z",
-        "id": "UC-004",
-        "name": "Test",
-        "shortDescription": "",
-        "businessProblem": "",
-        "solution": "",
-        "businessValue": "",
-        "domain": "Sales",
-        "businessOwner": "",
-        "productOwner": "",
-        "technicalOwner": "",
-        "status": "Idea",
-        "maturity": 0,
-        "aiUsed": true,
-        "exposure": "Internal",
-        "reusable": false,
-        "strategicRelevance": "Medium",
-        "complexity": 50,
-        "valueScore": 50,
-        "riskLevel": "Low",
-        "lifecycleCurrent": "IDEA",
-        "lifecycleDone": [],
-        "cost": {
-          "build": 0,
-          "runAnnual": 0,
-          "cloud": 0,
-          "ai": 0,
-          "maintenance": 0
-        },
-        "value": {
-          "directRevenue": 0,
-          "influencedRevenue": 0,
-          "pipeline": 0,
-          "costSavings": 0,
-          "costAvoidance": 0
-        },
-        "tech": {
-          "cloud": "Azure",
-          "hosting": "",
-          "appType": "",
-          "database": "",
-          "container": "Docker",
-          "repository": "GitHub Enterprise",
-          "cicd": "GitHub Actions",
-          "idp": "Microsoft Entra ID",
-          "aiProvider": "",
-          "model": "",
-          "apis": [],
-          "interfaces": []
-        },
-        "gov": {
-          "dataClassification": "Internal",
-          "personalData": false,
-          "confidentialData": false,
-          "customerData": false,
-          "internetExposure": false,
-          "businessCriticality": "Low",
-          "securityRisk": "Low",
-          "securityReviewed": false,
-          "dataProtectionReviewed": false,
-          "legalReviewed": false,
-          "aiGovernanceReviewed": false,
-          "architectureApproved": false,
-          "aiActClass": "noch nicht bewertet",
-          "lastReview": "—",
-          "nextReview": "—"
-        },
-        "ops": {
-          "serviceOwner": "—",
-          "supportTeam": "—",
-          "sla": "—",
-          "availabilityTarget": "—",
-          "monitoring": "—",
-          "alerting": "—",
-          "backup": "—",
-          "recovery": "—",
-          "patchManagement": "—",
-          "vulnerabilityManagement": "—",
-          "incidentManagement": "—",
-          "lastRelease": "—",
-          "lastBackupTest": "—"
-        },
-        "updatedBy": "bengelhardt2",
-        "updatedAt": "2026-10-09T06:57:36.738Z"
       }
     ],
     "deployments": [
@@ -361,6 +274,21 @@
     ],
     "retirementLog": [
       {
+        "createdBy": "bengelhardt2",
+        "createdAt": "2026-10-09T06:57:55.281Z",
+        "id": "UC-004",
+        "name": "Test",
+        "domain": "Sales",
+        "maturity": 0,
+        "date": "2026-10-09",
+        "category": "Kein nachweisbarer Business Value",
+        "reason": "War ein Test",
+        "deployments": 0,
+        "sources": 0,
+        "updatedBy": "bengelhardt2",
+        "updatedAt": "2026-10-09T06:57:55.281Z"
+      },
+      {
         "id": "UC-002",
         "name": "",
         "domain": "Sales",
@@ -406,6 +334,6 @@
       }
     ]
   },
-  "updatedAt": "2026-10-09T06:57:37.946Z",
+  "updatedAt": "2026-10-09T06:57:56.487Z",
   "updatedBy": "bengelhardt2"
 }
