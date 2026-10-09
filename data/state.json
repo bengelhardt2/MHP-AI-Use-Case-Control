@@ -70,7 +70,7 @@
         "solution": "Ein Crawler überwacht registrierte Vergabeplattformen, normalisiert Ausschreibungen und bewertet sie per LLM auf Relevanz, Passung zum Leistungsportfolio und Fristendruck. Treffer werden im Vertrieb als Lead ausgespielt.",
         "businessValue": "Frühere Kenntnis relevanter Ausschreibungen, höhere Trefferquote im Public Sector, deutlich reduzierter manueller Suchaufwand.",
         "domain": "Sales",
-        "businessOwner": "",
+        "businessOwner": "Bastian Engelhardt-Köppen",
         "productOwner": "Bastian Engelhardt-Köppen",
         "technicalOwner": "Nils Hyoma",
         "status": "Production",
@@ -161,7 +161,9 @@
           "incidentManagement": "",
           "lastRelease": "",
           "lastBackupTest": ""
-        }
+        },
+        "updatedBy": "bengelhardt2",
+        "updatedAt": "2026-10-09T08:17:55.496Z"
       },
       {
         "id": "UC-005",
@@ -250,6 +252,6 @@
       }
     ]
   },
-  "updatedAt": "2026-10-09T08:05:07.463Z",
-  "updatedBy": "felix-nussbaum"
+  "updatedAt": "2026-10-09T08:17:56.701Z",
+  "updatedBy": "bengelhardt2"
 }
