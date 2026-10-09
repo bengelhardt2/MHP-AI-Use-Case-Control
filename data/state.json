@@ -175,7 +175,7 @@
         "domain": "Sales",
         "businessOwner": "",
         "productOwner": "Felix Nussbaum",
-        "technicalOwner": "",
+        "technicalOwner": "Felix Nussbaum",
         "status": "POC",
         "maturity": 1,
         "aiUsed": true,
@@ -248,10 +248,10 @@
           "lastBackupTest": "—"
         },
         "updatedBy": "felix-nussbaum",
-        "updatedAt": "2026-10-09T08:05:06.259Z"
+        "updatedAt": "2026-10-09T08:38:12.466Z"
       }
     ]
   },
-  "updatedAt": "2026-10-09T08:17:56.701Z",
-  "updatedBy": "bengelhardt2"
+  "updatedAt": "2026-10-09T08:38:13.670Z",
+  "updatedBy": "felix-nussbaum"
 }
